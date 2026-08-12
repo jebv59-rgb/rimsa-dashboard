@@ -7233,7 +7233,7 @@ async function descargarSegmentosPDF(){
   try{
     buildInformeSegmentos();
     const el = document.getElementById('informe-segmentos');
-    el.style.display='block';
+    el.style.display='inline-block';  // shrink-wrap: evita capturar espacio en blanco a la derecha
     const canvas = await html2canvas(el, {scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
     el.style.display='none';
     const pdf = _pdfAjustadoDeCanvas(canvas, true);
@@ -8311,7 +8311,7 @@ async function compartirPDF(modo) {
     } else if(modo === 'segmentos') {
       buildInformeSegmentos();
       const el = document.getElementById('informe-segmentos');
-      el.style.display='block';
+      el.style.display='inline-block';  // shrink-wrap: evita capturar espacio en blanco a la derecha
       const canvas = await html2canvas(el, {scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
       el.style.display='none';
       const pdfSeg = _pdfAjustadoDeCanvas(canvas, true);
