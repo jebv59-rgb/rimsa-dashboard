@@ -6905,6 +6905,11 @@ function segToggleProductoEstrella(nombre, codigo){
   segGuardarDebounced();
   renderSegPanel();
 }
+function segToggleExpandido(nombre){
+  if(!window._segExpandido) window._segExpandido = {};
+  window._segExpandido[nombre] = !window._segExpandido[nombre];
+  renderSegPanel();
+}
 
 function renderSegPanel(){
   const el = document.getElementById('segsel-panel');
@@ -6924,36 +6929,32 @@ function renderSegPanel(){
 
   const segCheckboxes = Object.keys(D.segMap||{}).sort((a,b)=>a.localeCompare(b,'es')).map(nombre=>{
     const cfg = _segConfig(nombre);
-    const nprod = _segProductosDe(nombre).length;
-    return `<label style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:12.5px" onmouseover="this.style.background='#F9FAFB'" onmouseout="this.style.background=''">
-      <input type="checkbox" ${cfg.activo?'checked':''} onchange="segToggleActivo('${escAttrSeg(nombre)}')">
-      <span style="flex:1">${cfg.estrella?'⭐ ':''}${escapeHtmlSeg(nombre)}</span>
-      <small style="color:#6b7280">${nprod} prod.</small>
-      <button title="Marcar como estrella" onclick="event.preventDefault();segToggleEstrella('${escAttrSeg(nombre)}');" style="background:none;border:1px solid ${cfg.estrella?'#F0B429':'#dee2e6'};border-radius:5px;cursor:pointer;font-size:12px;padding:2px 6px">${cfg.estrella?'⭐':'☆'}</button>
-    </label>`;
+    const prods = _segProductosDe(nombre);
+    const nprod = prods.length;
+    const nElegidos = cfg.productosEstrella.length;
+    const expandido = !!(window._segExpandido && window._segExpandido[nombre]);
+    const chips = prods.slice(0,60).map(p=>{
+      const on = cfg.productosEstrella.includes(p.articulo);
+      return `<button onclick="event.preventDefault();segToggleProductoEstrella('${escAttrSeg(nombre)}',${p.articulo})"
+        style="border:1px solid ${on?'#F0B429':'#dee2e6'};background:${on?'#FFF6DF':'#fff'};color:${on?'#C98A00':'#374151'};
+        border-radius:14px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:${on?'700':'500'}">
+        ${on?'⭐ ':''}${escapeHtmlSeg(p.descripcion||('#'+p.articulo))}
+      </button>`;
+    }).join('');
+    return `<div style="border-bottom:1px solid #F1F3F5">
+      <label style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:12.5px" onmouseover="this.style.background='#F9FAFB'" onmouseout="this.style.background=''">
+        <input type="checkbox" ${cfg.activo?'checked':''} onchange="segToggleActivo('${escAttrSeg(nombre)}')">
+        <span style="flex:1">${cfg.estrella?'⭐ ':''}${escapeHtmlSeg(nombre)}</span>
+        <small style="color:#6b7280">${nElegidos?nElegidos+'/':''}${nprod} prod.</small>
+        <button title="Marcar como estrella" onclick="event.preventDefault();segToggleEstrella('${escAttrSeg(nombre)}');" style="background:none;border:1px solid ${cfg.estrella?'#F0B429':'#dee2e6'};border-radius:5px;cursor:pointer;font-size:12px;padding:2px 6px">${cfg.estrella?'⭐':'☆'}</button>
+        <button title="Ver / elegir productos" onclick="event.preventDefault();segToggleExpandido('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandido?'▲ ocultar':'▼ productos'}</button>
+      </label>
+      ${expandido?`<div style="padding:4px 6px 12px 28px;display:flex;flex-wrap:wrap;gap:5px">
+        ${chips || '<small style="color:#6b7280">Este segmento no tiene productos cargados en las listas.</small>'}
+        ${prods.length>60?`<small style="color:#6b7280;width:100%">... y ${prods.length-60} más (buscá en Precios para verlos todos)</small>`:''}
+      </div>`:''}
+    </div>`;
   }).join('');
-
-  const segmentosEstrellaCfg = segmentosActivos.filter(n=>_segConfig(n).estrella);
-  const estrellaPickerHtml = segmentosEstrellaCfg.length===0
-    ? '<div class="muted" style="font-size:12px">Marcá ⭐ algún segmento activo arriba para elegir sus productos estrella.</div>'
-    : segmentosEstrellaCfg.map(nombre=>{
-        const cfg = _segConfig(nombre);
-        const prods = _segProductosDe(nombre);
-        return `<div style="margin-bottom:10px">
-          <div style="font-weight:700;font-size:12.5px;margin-bottom:4px">⭐ ${escapeHtmlSeg(nombre)} <small style="font-weight:400;color:#6b7280">— elegí los productos que estos clientes deben tener sí o sí</small></div>
-          <div style="display:flex;flex-wrap:wrap;gap:5px">
-            ${prods.slice(0,60).map(p=>{
-              const on = cfg.productosEstrella.includes(p.articulo);
-              return `<button onclick="segToggleProductoEstrella('${escAttrSeg(nombre)}',${p.articulo})"
-                style="border:1px solid ${on?'#F0B429':'#dee2e6'};background:${on?'#FFF6DF':'#fff'};color:${on?'#C98A00':'#374151'};
-                border-radius:14px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:${on?'700':'500'}">
-                ${on?'⭐ ':''}${escapeHtmlSeg(p.descripcion||('#'+p.articulo))}
-              </button>`;
-            }).join('')}
-            ${prods.length>60?`<small style="color:#6b7280">... y ${prods.length-60} más (buscá en Precios para verlos todos)</small>`:''}
-          </div>
-        </div>`;
-      }).join('');
 
   let matrizHtml;
   if(state.listaVisita.length===0){
@@ -7001,13 +7002,8 @@ function renderSegPanel(){
     </div>
 
     <div class="sec" style="margin-bottom:10px">
-      <div class="sec-hdr">🎯 Segmentos a seguir <small>${segmentosActivos.length} activos de ${Object.keys(D.segMap||{}).length}</small></div>
-      <div style="padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px">${segCheckboxes}</div>
-    </div>
-
-    <div class="sec" style="margin-bottom:10px">
-      <div class="sec-hdr">⭐ Productos estrella</div>
-      <div style="padding:10px">${estrellaPickerHtml}</div>
+      <div class="sec-hdr">🎯 Segmentos a seguir <small>${segmentosActivos.length} activos de ${Object.keys(D.segMap||{}).length} · tocá "▼ productos" en cualquier segmento para elegir sus productos exclusivos</small></div>
+      <div style="padding:6px 10px">${segCheckboxes}</div>
     </div>
 
     <div class="sec">
