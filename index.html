@@ -6820,6 +6820,59 @@ function segCobertura(cod, nombreSeg){
   return codes.some(c=>compras.includes(c));
 }
 
+// Universo completo de clientes (unión de D.tasks, deduplicado por cod) con su vendedor asignado.
+// Es el mismo universo que usa el buscador de "clientes de visita", pero sin filtrar por búsqueda.
+function _segUniversoTodos(){
+  const seen = new Set(); const out=[];
+  Object.keys(D.tasks||{}).forEach(vend=>{
+    Object.values(D.tasks[vend]).forEach(lista=>{
+      (lista||[]).forEach(c=>{
+        if(seen.has(c.cod)) return;
+        seen.add(c.cod);
+        out.push({cod:c.cod, vend_cod:vend});
+      });
+    });
+  });
+  return out;
+}
+
+// Cobertura global y por vendedor para cada segmento, sobre el universo total de clientes
+// (no solo los agregados a la lista de visita). Se cachea por corte para no recalcular en cada render.
+function _segCoberturaPorSegmento(){
+  const corte = (D.config&&D.config.corte)||'';
+  if(window._segCobCache && window._segCobCache.corte===corte) return window._segCobCache.data;
+  const universo = _segUniversoTodos();
+  const nombres = Object.keys(D.segMap||{});
+  const out = {};
+  nombres.forEach(nombre=>{
+    const codes = (D.segMap||{})[nombre]||[];
+    if(!codes.length) return; // segmento sin códigos: cobertura indefinida, se omite
+    let compGlob=0;
+    const porVend={};
+    universo.forEach(cli=>{
+      const compras=(D.segCompras||{})[cli.cod]||[];
+      const compro = codes.some(c=>compras.includes(c));
+      if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
+      porVend[cli.vend_cod].universo++;
+      if(compro){ porVend[cli.vend_cod].compradores++; compGlob++; }
+    });
+    out[nombre] = {
+      universo: universo.length,
+      compradores: compGlob,
+      pct: universo.length? Math.round(compGlob/universo.length*1000)/10 : 0,
+      porVendedor: porVend
+    };
+  });
+  window._segCobCache = {corte, data: out};
+  return out;
+}
+
+function segToggleExpandidoCob(nombre){
+  if(!window._segExpandidoCob) window._segExpandidoCob = {};
+  window._segExpandidoCob[nombre] = !window._segExpandidoCob[nombre];
+  renderSegPanel();
+}
+
 // Universo de clientes (unión de D.tasks, deduplicado por cod) para buscar/agregar a la lista de visita
 function _segBuscarClientes(q){
   q=(q||'').toLowerCase().trim();
@@ -6997,6 +7050,34 @@ function renderSegPanel(){
     </div>`;
   }).join('');
 
+  const covStats = _segCoberturaPorSegmento();
+  const covRows = Object.keys(covStats).sort((a,b)=>covStats[a].pct-covStats[b].pct).map(nombre=>{
+    const st = covStats[nombre];
+    const expandidoCob = !!(window._segExpandidoCob && window._segExpandidoCob[nombre]);
+    const vendRows = Object.keys(st.porVendedor)
+      .sort((a,b)=>(D.vend_names[a]||a).localeCompare(D.vend_names[b]||b,'es'))
+      .map(vc=>{
+        const vs = st.porVendedor[vc];
+        const vpct = vs.universo ? Math.round(vs.compradores/vs.universo*1000)/10 : 0;
+        const vname = D.vend_names[vc]||vc;
+        const vcolor = vpct>=50?'#1B7F3A':vpct>=25?'#D97706':'#B01020';
+        return `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:11.5px;border-bottom:1px solid #F1F3F5">
+          <span>${vc} — ${escapeHtmlSeg(vname)}</span>
+          <span><b style="color:${vcolor}">${vpct}%</b> <small style="color:#6b7280">(${vs.compradores}/${vs.universo})</small></span>
+        </div>`;
+      }).join('');
+    const cColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
+    return `<div style="border-bottom:1px solid #F1F3F5">
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 6px">
+        <span style="flex:1;font-size:12.5px">${escapeHtmlSeg(nombre)}</span>
+        <span style="font-size:13px;font-weight:800;color:${cColor};min-width:44px;text-align:right">${st.pct}%</span>
+        <small style="color:#6b7280;min-width:80px;text-align:right">${st.compradores} de ${st.universo}</small>
+        <button title="Ver por vendedor" onclick="event.preventDefault();segToggleExpandidoCob('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoCob?'▲':'👥 ▼'}</button>
+      </div>
+      ${expandidoCob?`<div style="padding:2px 10px 10px 10px;background:#FAFBFF">${vendRows||'<small style="color:#6b7280">Sin datos por vendedor.</small>'}</div>`:''}
+    </div>`;
+  }).join('');
+
   let matrizHtml;
   if(state.listaVisita.length===0){
     matrizHtml = '<div style="text-align:center;padding:30px;color:var(--muted)">Agregá clientes a la lista de visita para ver la matriz.</div>';
@@ -7045,6 +7126,11 @@ function renderSegPanel(){
     <div class="sec" style="margin-bottom:10px">
       <div class="sec-hdr">🎯 Segmentos a seguir <small>${segmentosActivos.length} activos de ${Object.keys(D.segMap||{}).length} · tocá "▼ productos" en cualquier segmento para elegir sus productos exclusivos</small></div>
       <div style="padding:6px 10px">${segCheckboxes}</div>
+    </div>
+
+    <div class="sec" style="margin-bottom:10px">
+      <div class="sec-hdr">📊 Cobertura por segmento <small>global y por vendedor, sobre el universo total de clientes activos (no solo la lista de visita) · ordenado de menor a mayor cobertura</small></div>
+      <div style="padding:6px 10px;max-height:480px;overflow:auto">${covRows || '<div class="muted" style="padding:10px;font-size:12px">Sin datos de cobertura todavía.</div>'}</div>
     </div>
 
     <div class="sec">
