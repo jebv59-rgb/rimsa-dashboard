@@ -1060,6 +1060,66 @@ function xlsHandleFile(file){
         }
       }
 
+      // ── HOJA: coberturas → compras por cliente y producto puntual (SKU) ───
+      // Tabla dinámica: fila0=periodo (ej. "Trimestre 3"), fila header="Etiquetas de fila"
+      // con cols = "NOMBRE PRODUCTO (codigo)" y última "Total general" (se ignora).
+      // Debajo: filas vendedor ("001   - NOMBRE") seguidas de sus clientes
+      // ("NOMBRE CLIENTE (codigo_cliente)"), y al final una fila "Total general".
+      var cov=toArr("coberturas");
+      if(cov&&cov.length>1){
+        var periodoCov='';
+        var fila0cov=cov[0]||[];
+        for(var pk=0;pk<fila0cov.length;pk++){
+          if(fila0cov[pk]&&String(fila0cov[pk]).trim().toLowerCase()!=='fecha'){ periodoCov=String(fila0cov[pk]).trim(); break; }
+        }
+        var hdrRowCov=-1;
+        for(var hci=0; hci<Math.min(cov.length,10); hci++){
+          var c0cov = cov[hci] && cov[hci][0];
+          if(c0cov && String(c0cov).trim().toLowerCase()==='etiquetas de fila'){ hdrRowCov=hci; break; }
+        }
+        if(hdrRowCov>=0){
+          var hdrCov = cov[hdrRowCov];
+          var colProdCov = [];
+          for(var cci=1; cci<hdrCov.length; cci++){
+            var hcov = hdrCov[cci]; if(!hcov) continue;
+            var hscov = String(hcov).trim();
+            if(/^total general$/i.test(hscov)) continue;
+            var mcodcov = hscov.match(/\((\d+)\)\s*$/);
+            if(!mcodcov) continue;
+            colProdCov.push({col:cci, codigo:parseInt(mcodcov[1],10)});
+          }
+          var newProdCompras={};
+          var nCliCov=0;
+          for(var rci=hdrRowCov+1; rci<cov.length; rci++){
+            var rowcov=cov[rci]; if(!rowcov||rowcov[0]==null) continue;
+            var scov=String(rowcov[0]).trim();
+            if(/^total general$/i.test(scov)) continue;
+            var mvcov = scov.match(/^(\d{3})\s*-/);
+            if(mvcov) continue; // fila de vendedor, sin datos propios
+            var mccov = scov.match(/\((\d+)\)\s*$/);
+            if(!mccov) continue; // fila no reconocida
+            var clicodcov = mccov[1].padStart(10,'0');
+            nCliCov++;
+            var setcov=null;
+            for(var pci=0; pci<colProdCov.length; pci++){
+              var cpcov = colProdCov[pci];
+              var vcov = rowcov[cpcov.col];
+              var qtycov = parseFloat(vcov)||0;
+              if(qtycov>0){
+                if(!setcov) setcov = [];
+                setcov.push(cpcov.codigo);
+              }
+            }
+            if(setcov) newProdCompras[clicodcov]=setcov;
+          }
+          newD.prodCompras = newProdCompras;
+          newD.prodCoberturaPeriodo = periodoCov;
+          log('✅ coberturas: '+Object.keys(newProdCompras).length+' clientes con compras registradas ('+(periodoCov||'sin período')+')',74);
+        } else {
+          log('⚠️ coberturas: no se encontró la fila de encabezados ("Etiquetas de fila")',74);
+        }
+      }
+
       // ── HOJA: clientes con frezer → reconstruir lista completa ────────────
       // cols (0-based): cliente=H(7), KG2026=P(15)+R(17)+T(19), KG2025=J(9)+L(11)+N(13)
       var frza=toArr("clientes con frezer");
@@ -6616,7 +6676,7 @@ function buildInformeTarea(dia, vfilt) {
 // estrella por segmento. Persiste en Supabase (id=4) para compartir entre
 // dispositivos, igual que D (id=1) y concesiones (id=2).
 // ══════════════════════════════════════════════════════════════
-window._segState = { listaVisita: [], segmentos: {} };
+window._segState = { listaVisita: [], segmentos: {}, grupos: {}, covModo: 'segmento' };
 window._segInited = false;
 
 // ── Datos de pago de la empresa (banco/CBU/alias/CUIT) que se insertan en los
@@ -6766,6 +6826,8 @@ function segGuardarDebounced(){
 async function initSegPanel(){
   const cloud = await jbinCargarSeg();
   if(cloud && cloud.listaVisita) window._segState = cloud;
+  if(!window._segState.grupos) window._segState.grupos = {};
+  if(!window._segState.covModo) window._segState.covModo = 'segmento';
   window._segInited = true;
   renderSegPanel();
 }
@@ -6870,6 +6932,100 @@ function _segCoberturaPorSegmento(){
 function segToggleExpandidoCob(nombre){
   if(!window._segExpandidoCob) window._segExpandidoCob = {};
   window._segExpandidoCob[nombre] = !window._segExpandidoCob[nombre];
+  renderSegPanel();
+}
+
+// Cobertura global y por vendedor para una lista arbitraria de códigos de producto (SKU),
+// usando D.prodCompras (hoja "coberturas" del Excel: compras por cliente y artículo puntual).
+// Devuelve null si todavía no se cargó la hoja de coberturas.
+function _segCoberturaPorProducto(codigos){
+  if(!D.prodCompras) return null;
+  codigos = (codigos||[]).map(c=>parseInt(c));
+  if(!codigos.length) return {universo:0, compradores:0, pct:0, porVendedor:{}};
+  const universo = _segUniversoTodos();
+  let compGlob=0;
+  const porVend={};
+  universo.forEach(cli=>{
+    const compras=(D.prodCompras||{})[cli.cod]||[];
+    const compro = codigos.some(c=>compras.includes(c));
+    if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
+    porVend[cli.vend_cod].universo++;
+    if(compro){ porVend[cli.vend_cod].compradores++; compGlob++; }
+  });
+  return {
+    universo: universo.length,
+    compradores: compGlob,
+    pct: universo.length? Math.round(compGlob/universo.length*1000)/10 : 0,
+    porVendedor: porVend
+  };
+}
+
+// ── Grupos personalizados (lanzamientos, concursos, reenfoques, etc.) ──────
+// Listas de productos puntuales armadas a mano, independientes de los segmentos
+// formales. Se persisten junto al resto del estado de Segmentación (Supabase id=4).
+function _segGrupoConfig(nombre){
+  if(!window._segState.grupos) window._segState.grupos = {};
+  if(!window._segState.grupos[nombre]) window._segState.grupos[nombre] = {productos:[], creado:Date.now()};
+  return window._segState.grupos[nombre];
+}
+function segCrearGrupo(){
+  const inp = document.getElementById('seg-grupo-nuevo-nombre');
+  if(!inp) return;
+  const nombre = (inp.value||'').trim();
+  if(!nombre){ mostrarToast('Poné un nombre para el grupo.'); return; }
+  if(window._segState.grupos && window._segState.grupos[nombre]){ mostrarToast('Ya existe un grupo con ese nombre.'); return; }
+  _segGrupoConfig(nombre); // lo crea
+  inp.value='';
+  segGuardarDebounced();
+  renderSegPanel();
+}
+function segEliminarGrupo(nombre){
+  if(!confirm('¿Eliminar el grupo "'+nombre+'"? Se pierde la lista de productos que armaste.')) return;
+  delete window._segState.grupos[nombre];
+  segGuardarDebounced();
+  renderSegPanel();
+}
+function segToggleProductoGrupo(nombre, codigo){
+  const cfg = _segGrupoConfig(nombre);
+  codigo = parseInt(codigo);
+  const i = cfg.productos.indexOf(codigo);
+  if(i>=0) cfg.productos.splice(i,1); else cfg.productos.push(codigo);
+  segGuardarDebounced();
+  renderSegPanel();
+}
+function segToggleExpandidoGrupo(nombre){
+  if(!window._segExpandidoGrupo) window._segExpandidoGrupo = {};
+  window._segExpandidoGrupo[nombre] = !window._segExpandidoGrupo[nombre];
+  renderSegPanel();
+}
+function segBuscarProductoGrupo(nombre, idx){
+  const inp = document.getElementById('seg-grupo-add-input-'+idx);
+  const wrap = document.getElementById('seg-grupo-add-results-'+idx);
+  if(!inp||!wrap) return;
+  const q = inp.value.toLowerCase().trim();
+  if(!q || q.length<2){ wrap.style.display='none'; wrap.innerHTML=''; return; }
+  const cfg = _segGrupoConfig(nombre);
+  const cat = _segCatalogoProductos();
+  const resultados = Object.values(cat).filter(p=>{
+    if(cfg.productos.includes(p.articulo)) return false;
+    const desc = (p.descripcion||'').toLowerCase();
+    return desc.includes(q) || String(p.articulo).includes(q);
+  }).sort((a,b)=>(a.descripcion||'').localeCompare(b.descripcion||'','es')).slice(0,15);
+  if(!resultados.length){
+    wrap.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#6b7280">Sin resultados.</div>';
+    wrap.style.display='block';
+    return;
+  }
+  wrap.innerHTML = resultados.map(p=>`
+    <div onclick="segToggleProductoGrupo('${escAttrSeg(nombre)}', ${p.articulo})"
+      style="padding:7px 10px;font-size:12.5px;border-bottom:1px solid #f3f4f6;cursor:pointer">
+      ${escapeHtmlSeg(p.descripcion||('#'+p.articulo))} <small style="color:#6b7280">#${p.articulo}</small>
+    </div>`).join('');
+  wrap.style.display='block';
+}
+function segSetCovModo(modo){
+  window._segState.covModo = modo;
+  segGuardarDebounced();
   renderSegPanel();
 }
 
@@ -7050,14 +7206,11 @@ function renderSegPanel(){
     </div>`;
   }).join('');
 
-  const covStats = _segCoberturaPorSegmento();
-  const covRows = Object.keys(covStats).sort((a,b)=>covStats[a].pct-covStats[b].pct).map(nombre=>{
-    const st = covStats[nombre];
-    const expandidoCob = !!(window._segExpandidoCob && window._segExpandidoCob[nombre]);
-    const vendRows = Object.keys(st.porVendedor)
+  const covModo = window._segState.covModo || 'segmento';
+  const _renderVendRows = (porVendedor) => Object.keys(porVendedor)
       .sort((a,b)=>(D.vend_names[a]||a).localeCompare(D.vend_names[b]||b,'es'))
       .map(vc=>{
-        const vs = st.porVendedor[vc];
+        const vs = porVendedor[vc];
         const vpct = vs.universo ? Math.round(vs.compradores/vs.universo*1000)/10 : 0;
         const vname = D.vend_names[vc]||vc;
         const vcolor = vpct>=50?'#1B7F3A':vpct>=25?'#D97706':'#B01020';
@@ -7066,15 +7219,88 @@ function renderSegPanel(){
           <span><b style="color:${vcolor}">${vpct}%</b> <small style="color:#6b7280">(${vs.compradores}/${vs.universo})</small></span>
         </div>`;
       }).join('');
-    const cColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
-    return `<div style="border-bottom:1px solid #F1F3F5">
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 6px">
-        <span style="flex:1;font-size:12.5px">${escapeHtmlSeg(nombre)}</span>
-        <span style="font-size:13px;font-weight:800;color:${cColor};min-width:44px;text-align:right">${st.pct}%</span>
-        <small style="color:#6b7280;min-width:80px;text-align:right">${st.compradores} de ${st.universo}</small>
-        <button title="Ver por vendedor" onclick="event.preventDefault();segToggleExpandidoCob('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoCob?'▲':'👥 ▼'}</button>
+
+  let covRows = '';
+  let covAvisoTildados = '';
+  if(covModo==='segmento'){
+    const covStats = _segCoberturaPorSegmento();
+    covRows = Object.keys(covStats).sort((a,b)=>covStats[a].pct-covStats[b].pct).map(nombre=>{
+      const st = covStats[nombre];
+      const expandidoCob = !!(window._segExpandidoCob && window._segExpandidoCob[nombre]);
+      const cColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
+      return `<div style="border-bottom:1px solid #F1F3F5">
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 6px">
+          <span style="flex:1;font-size:12.5px">${escapeHtmlSeg(nombre)}</span>
+          <span style="font-size:13px;font-weight:800;color:${cColor};min-width:44px;text-align:right">${st.pct}%</span>
+          <small style="color:#6b7280;min-width:80px;text-align:right">${st.compradores} de ${st.universo}</small>
+          <button title="Ver por vendedor" onclick="event.preventDefault();segToggleExpandidoCob('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoCob?'▲':'👥 ▼'}</button>
+        </div>
+        ${expandidoCob?`<div style="padding:2px 10px 10px 10px;background:#FAFBFF">${_renderVendRows(st.porVendedor)||'<small style="color:#6b7280">Sin datos por vendedor.</small>'}</div>`:''}
+      </div>`;
+    }).join('');
+  } else {
+    // Modo "solo tildados ⭐": cobertura real a nivel de producto puntual (SKU),
+    // requiere la hoja "coberturas" del Excel (D.prodCompras).
+    if(!D.prodCompras){
+      covAvisoTildados = '<div class="muted" style="font-size:12px;padding:8px 0">Todavía no subiste la hoja "coberturas" del Excel (detalle de compra por cliente y producto). Subila para poder calcular esto.</div>';
+    } else {
+      const conTildados = Object.keys(D.segMap||{}).filter(n=>_segConfig(n).productosEstrella.length>0);
+      if(!conTildados.length){
+        covAvisoTildados = '<div class="muted" style="font-size:12px;padding:8px 0">Todavía no tildaste productos ⭐ en ningún segmento (arriba, en "Segmentos a seguir").</div>';
+      } else {
+        const statsT = {};
+        conTildados.forEach(n=>{ statsT[n] = _segCoberturaPorProducto(_segConfig(n).productosEstrella); });
+        covRows = conTildados.sort((a,b)=>statsT[a].pct-statsT[b].pct).map(nombre=>{
+          const st = statsT[nombre];
+          const expandidoCob = !!(window._segExpandidoCob && window._segExpandidoCob['T·'+nombre]);
+          const cColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
+          const nprodT = _segConfig(nombre).productosEstrella.length;
+          return `<div style="border-bottom:1px solid #F1F3F5">
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 6px">
+              <span style="flex:1;font-size:12.5px">${escapeHtmlSeg(nombre)} <small style="color:#6b7280">(${nprodT} prod. tildados)</small></span>
+              <span style="font-size:13px;font-weight:800;color:${cColor};min-width:44px;text-align:right">${st.pct}%</span>
+              <small style="color:#6b7280;min-width:80px;text-align:right">${st.compradores} de ${st.universo}</small>
+              <button title="Ver por vendedor" onclick="event.preventDefault();segToggleExpandidoCob('T·${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoCob?'▲':'👥 ▼'}</button>
+            </div>
+            ${expandidoCob?`<div style="padding:2px 10px 10px 10px;background:#FAFBFF">${_renderVendRows(st.porVendedor)||'<small style="color:#6b7280">Sin datos por vendedor.</small>'}</div>`:''}
+          </div>`;
+        }).join('');
+      }
+    }
+  }
+
+  const gruposNombres = Object.keys((window._segState.grupos)||{}).sort((a,b)=>a.localeCompare(b,'es'));
+  const grupoRows = gruposNombres.map((nombre, gidx)=>{
+    const gcfg = _segGrupoConfig(nombre);
+    const catAllG = _segCatalogoProductos();
+    const prodsG = gcfg.productos.map(cod=>catAllG[cod]).filter(Boolean);
+    const stG = D.prodCompras ? _segCoberturaPorProducto(gcfg.productos) : null;
+    const expandidoG = !!(window._segExpandidoGrupo && window._segExpandidoGrupo[nombre]);
+    const expandidoGCob = !!(window._segExpandidoCob && window._segExpandidoCob['G·'+nombre]);
+    const chipsG = prodsG.map(p=>`<button onclick="event.preventDefault();segToggleProductoGrupo('${escAttrSeg(nombre)}',${p.articulo})"
+        style="border:1px solid #F0B429;background:#FFF6DF;color:#C98A00;border-radius:14px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:700">
+        ✕ ${escapeHtmlSeg(p.descripcion||('#'+p.articulo))}
+      </button>`).join('');
+    const cColorG = !stG ? '#9CA3AF' : (stG.pct>=50?'#1B7F3A':stG.pct>=25?'#D97706':'#B01020');
+    return `<div style="border:1px solid #EEF0F3;border-radius:8px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 10px">
+        <span style="flex:1;font-weight:700;font-size:12.5px">${escapeHtmlSeg(nombre)} <small style="font-weight:400;color:#6b7280">(${prodsG.length} prod.)</small></span>
+        ${stG?`<span style="font-size:13px;font-weight:800;color:${cColorG};min-width:44px;text-align:right">${stG.pct}%</span>
+        <small style="color:#6b7280;min-width:80px;text-align:right">${stG.compradores} de ${stG.universo}</small>
+        <button title="Ver por vendedor" onclick="event.preventDefault();segToggleExpandidoCob('G·${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoGCob?'▲':'👥 ▼'}</button>`:''}
+        <button title="Editar productos" onclick="event.preventDefault();segToggleExpandidoGrupo('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandidoG?'▲ ocultar':'▼ productos'}</button>
+        <button title="Eliminar grupo" onclick="event.preventDefault();segEliminarGrupo('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #F3D2D2;color:#B01020;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">🗑️</button>
       </div>
-      ${expandidoCob?`<div style="padding:2px 10px 10px 10px;background:#FAFBFF">${vendRows||'<small style="color:#6b7280">Sin datos por vendedor.</small>'}</div>`:''}
+      ${expandidoGCob&&stG?`<div style="padding:2px 10px 10px 10px;background:#FAFBFF">${_renderVendRows(stG.porVendedor)||'<small style="color:#6b7280">Sin datos por vendedor.</small>'}</div>`:''}
+      ${expandidoG?`<div style="padding:4px 10px 12px 10px;border-top:1px solid #F1F3F5">
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+          ${chipsG || '<small style="color:#6b7280">Todavía no agregaste productos a este grupo.</small>'}
+        </div>
+        <div style="position:relative;max-width:340px">
+          <input type="text" id="seg-grupo-add-input-${gidx}" placeholder="+ Agregar producto (nombre o código)..." style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:12px" oninput="segBuscarProductoGrupo('${escAttrSeg(nombre)}', ${gidx})">
+          <div id="seg-grupo-add-results-${gidx}" style="position:absolute;top:calc(100% + 3px);left:0;right:0;background:#fff;border:1px solid #d1d5db;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;z-index:60;display:none"></div>
+        </div>
+      </div>`:''}
     </div>`;
   }).join('');
 
@@ -7130,7 +7356,28 @@ function renderSegPanel(){
 
     <div class="sec" style="margin-bottom:10px">
       <div class="sec-hdr">📊 Cobertura por segmento <small>global y por vendedor, sobre el universo total de clientes activos (no solo la lista de visita) · ordenado de menor a mayor cobertura</small></div>
-      <div style="padding:6px 10px;max-height:480px;overflow:auto">${covRows || '<div class="muted" style="padding:10px;font-size:12px">Sin datos de cobertura todavía.</div>'}</div>
+      <div style="padding:6px 10px">
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button onclick="segSetCovModo('segmento')" style="border:1px solid ${covModo==='segmento'?'#1A3A6B':'#dee2e6'};background:${covModo==='segmento'?'#1A3A6B':'#fff'};color:${covModo==='segmento'?'#fff':'#374151'};border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer">Segmento completo</button>
+          <button onclick="segSetCovModo('tildados')" style="border:1px solid ${covModo==='tildados'?'#1A3A6B':'#dee2e6'};background:${covModo==='tildados'?'#1A3A6B':'#fff'};color:${covModo==='tildados'?'#fff':'#374151'};border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer">⭐ Solo productos tildados</button>
+        </div>
+        <div style="max-height:480px;overflow:auto">
+          ${covAvisoTildados}
+          ${covRows || (covAvisoTildados?'':'<div class="muted" style="padding:10px;font-size:12px">Sin datos de cobertura todavía.</div>')}
+        </div>
+      </div>
+    </div>
+
+    <div class="sec" style="margin-bottom:10px">
+      <div class="sec-hdr">🚀 Grupos personalizados <small>lanzamientos, reenfoques, concursos u otras listas de productos puntuales — requiere la hoja "coberturas" del Excel</small></div>
+      <div style="padding:6px 10px">
+        <div style="display:flex;gap:6px;margin-bottom:10px;max-width:420px">
+          <input type="text" id="seg-grupo-nuevo-nombre" placeholder="Nombre del grupo (ej. Lanzamiento Cofler Extra)..." style="flex:1;border:1px solid #d1d5db;border-radius:6px;padding:6px 9px;font-size:12.5px" onkeydown="if(event.key==='Enter'){event.preventDefault();segCrearGrupo();}">
+          <button onclick="segCrearGrupo()" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12.5px;font-weight:600;cursor:pointer">+ Crear</button>
+        </div>
+        ${!D.prodCompras?'<div class="muted" style="font-size:12px;padding:6px 0">Todavía no subiste la hoja "coberturas" del Excel — podés crear grupos y elegir productos, pero el % de cobertura no se va a poder calcular hasta que la subas.</div>':''}
+        ${grupoRows || '<div class="muted" style="font-size:12px;padding:6px 0">Todavía no armaste ningún grupo.</div>'}
+      </div>
     </div>
 
     <div class="sec">
