@@ -6268,7 +6268,13 @@ function buildTarea(){
   <div id="informe-tarea" style="display:none"></div>
 
   <!-- ── INFORME SEGMENTOS (oculto, solo para capturar) ── -->
-  <div id="informe-segmentos" style="display:none"></div>`;
+  <div id="informe-segmentos" style="display:none"></div>
+
+  <!-- ── INFORME COBERTURA POR SEGMENTO (oculto, solo para capturar) ── -->
+  <div id="informe-cobertura-seg" style="display:none"></div>
+
+  <!-- ── INFORME COBERTURA DE GRUPOS PERSONALIZADOS (oculto, solo para capturar) ── -->
+  <div id="informe-cobertura-grupos" style="display:none"></div>`;
 
   window._tareaDia  = diaActivo;
   window._tareaVend = 'TODOS';
@@ -7355,7 +7361,10 @@ function renderSegPanel(){
     </div>
 
     <div class="sec" style="margin-bottom:10px">
-      <div class="sec-hdr">📊 Cobertura por segmento <small>global y por vendedor, sobre el universo total de clientes activos (no solo la lista de visita) · ordenado de menor a mayor cobertura</small></div>
+      <div class="sec-hdr" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span>📊 Cobertura por segmento <small>global y por vendedor, sobre el universo total de clientes activos (no solo la lista de visita) · ordenado de menor a mayor cobertura</small></span>
+        <button onclick="descargarCoberturaSegPDF()" title="Descargar PDF de cobertura por segmento" style="background:#374151;color:#fff;border:none;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;flex-shrink:0">⬇️ PDF</button>
+      </div>
       <div style="padding:6px 10px">
         <div style="display:flex;gap:6px;margin-bottom:8px">
           <button onclick="segSetCovModo('segmento')" style="border:1px solid ${covModo==='segmento'?'#1A3A6B':'#dee2e6'};background:${covModo==='segmento'?'#1A3A6B':'#fff'};color:${covModo==='segmento'?'#fff':'#374151'};border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer">Segmento completo</button>
@@ -7369,7 +7378,10 @@ function renderSegPanel(){
     </div>
 
     <div class="sec" style="margin-bottom:10px">
-      <div class="sec-hdr">🚀 Grupos personalizados <small>lanzamientos, reenfoques, concursos u otras listas de productos puntuales — requiere la hoja "coberturas" del Excel</small></div>
+      <div class="sec-hdr" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span>🚀 Grupos personalizados <small>lanzamientos, reenfoques, concursos u otras listas de productos puntuales — requiere la hoja "coberturas" del Excel</small></span>
+        <button onclick="descargarCoberturaGruposPDF()" title="Descargar PDF de cobertura de grupos" style="background:#374151;color:#fff;border:none;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;flex-shrink:0">⬇️ PDF</button>
+      </div>
       <div style="padding:6px 10px">
         <div style="display:flex;gap:6px;margin-bottom:10px;max-width:420px">
           <input type="text" id="seg-grupo-nuevo-nombre" placeholder="Nombre del grupo (ej. Lanzamiento Cofler Extra)..." style="flex:1;border:1px solid #d1d5db;border-radius:6px;padding:6px 9px;font-size:12.5px" onkeydown="if(event.key==='Enter'){event.preventDefault();segCrearGrupo();}">
@@ -7574,6 +7586,150 @@ async function descargarSegmentosPDF(){
     mostrarToast('PDF descargado.');
   }catch(err){
     console.error('descargarSegmentosPDF:',err);
+    mostrarToast('Error al generar el PDF. Intentá de nuevo.');
+  }finally{
+    if(btn){ btn.innerHTML=btn._origTxt||'⬇️'; btn.disabled=false; }
+  }
+}
+
+// ── PDF: Cobertura por segmento (global + por vendedor) ────────────────────
+function buildInformeCoberturaSegmentos(){
+  const stats = _segCoberturaPorSegmento();
+  const nombres = Object.keys(stats).sort((a,b)=>stats[a].pct-stats[b].pct);
+  const vendCods = Array.from(new Set(nombres.flatMap(n=>Object.keys(stats[n].porVendedor))))
+    .sort((a,b)=>(D.vend_names[a]||a).localeCompare(D.vend_names[b]||b,'es'));
+  const COL_SEG=170, COL_GLOB=72, COL_VEND=42;
+  const headerVend = vendCods.map(vc=>`<th style="width:${COL_VEND}px;padding:3px 1px;font-size:6.5px">${escapeHtmlSeg((D.vend_names[vc]||vc).split(' ').slice(-1)[0]||vc)}</th>`).join('');
+  const filas = nombres.map((n,i)=>{
+    const st = stats[n];
+    const celdas = vendCods.map(vc=>{
+      const vs = st.porVendedor[vc];
+      if(!vs || !vs.universo) return `<td style="text-align:center;color:#9CA3AF;font-size:7.5px">—</td>`;
+      const vpct = Math.round(vs.compradores/vs.universo*1000)/10;
+      const color = vpct>=50?'#1B7F3A':vpct>=25?'#D97706':'#B01020';
+      return `<td style="text-align:center;font-size:7.5px;font-weight:700;color:${color}">${vpct}%</td>`;
+    }).join('');
+    const gColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
+    return `<tr style="background:${i%2?'#F8FAFF':'#fff'}">
+      <td style="width:${COL_SEG}px;padding:3px 5px;font-size:9px;font-weight:700">${escapeHtmlSeg(n)}</td>
+      <td style="width:${COL_GLOB}px;text-align:center;padding:3px 2px">
+        <span style="font-size:10px;font-weight:800;color:${gColor}">${st.pct}%</span>
+        <br><small style="font-size:6.5px;color:#6b7280">${st.compradores}/${st.universo}</small>
+      </td>
+      ${celdas}
+    </tr>`;
+  }).join('');
+  const anchoTabla = COL_SEG+COL_GLOB+COL_VEND*vendCods.length;
+  const html = `<div class="informe-block print-page" style="width:${anchoTabla+28}px;background:#fff;font-family:Arial,Helvetica,sans-serif;padding:14px">
+    <div style="background:#001F58;color:#fff;text-align:center;padding:10px;border-radius:6px 6px 0 0">
+      <div style="font-size:14px;font-weight:800">COBERTURA POR SEGMENTO — GLOBAL Y POR VENDEDOR</div>
+      <div style="font-size:10px;opacity:.8">${(D.config&&D.config.corte)||''} · ${nombres.length} segmentos · universo total: ${_segUniversoTodos().length} clientes</div>
+    </div>
+    <table style="border-collapse:collapse;table-layout:fixed;font-size:9px;margin-top:8px">
+      <thead><tr style="background:#2A3F6F;color:#fff">
+        <th style="width:${COL_SEG}px;padding:3px 5px;text-align:left;font-size:8px">Segmento</th>
+        <th style="width:${COL_GLOB}px;padding:3px 2px;font-size:8px">Global</th>
+        ${headerVend}
+      </tr></thead>
+      <tbody>${filas}</tbody>
+    </table>
+    <div style="text-align:center;font-size:8px;color:#9CA3AF;margin-top:10px">Generado el ${new Date().toLocaleDateString('es-AR')} — Arcor Consumo Masivo · San Francisco - Sastre</div>
+  </div>`;
+  document.getElementById('informe-cobertura-seg').innerHTML = html;
+}
+async function descargarCoberturaSegPDF(){
+  const btn = event?.target?.closest('button');
+  if(btn){ btn._origTxt=btn.innerHTML; btn.innerHTML='⏳'; btn.disabled=true; }
+  try{
+    buildInformeCoberturaSegmentos();
+    const el = document.getElementById('informe-cobertura-seg');
+    el.style.display='inline-block';
+    const canvas = await html2canvas(el, {scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
+    el.style.display='none';
+    const pdf = _pdfAjustadoDeCanvas(canvas, true);
+    pdf.save('cobertura_por_segmento.pdf');
+    mostrarToast('PDF descargado.');
+  }catch(err){
+    console.error('descargarCoberturaSegPDF:',err);
+    mostrarToast('Error al generar el PDF. Intentá de nuevo.');
+  }finally{
+    if(btn){ btn.innerHTML=btn._origTxt||'⬇️'; btn.disabled=false; }
+  }
+}
+
+// ── PDF: Cobertura de grupos personalizados (lanzamientos, concursos, etc.) ─
+function buildInformeCoberturaGrupos(){
+  const nombresTodos = Object.keys((window._segState.grupos)||{}).sort((a,b)=>a.localeCompare(b,'es'));
+  const stats = {};
+  nombresTodos.forEach(n=>{
+    const prods = _segGrupoConfig(n).productos;
+    if(prods.length && D.prodCompras) stats[n] = _segCoberturaPorProducto(prods);
+  });
+  const nombres = Object.keys(stats).sort((a,b)=>stats[a].pct-stats[b].pct);
+  const vendCods = Array.from(new Set(nombres.flatMap(n=>Object.keys(stats[n].porVendedor))))
+    .sort((a,b)=>(D.vend_names[a]||a).localeCompare(D.vend_names[b]||b,'es'));
+  const catAllG = _segCatalogoProductos();
+  const COL_SEG=170, COL_GLOB=72, COL_VEND=42;
+  const headerVend = vendCods.map(vc=>`<th style="width:${COL_VEND}px;padding:3px 1px;font-size:6.5px">${escapeHtmlSeg((D.vend_names[vc]||vc).split(' ').slice(-1)[0]||vc)}</th>`).join('');
+  const filas = nombres.map((n,i)=>{
+    const st = stats[n];
+    const nprod = _segGrupoConfig(n).productos.length;
+    const celdas = vendCods.map(vc=>{
+      const vs = st.porVendedor[vc];
+      if(!vs || !vs.universo) return `<td style="text-align:center;color:#9CA3AF;font-size:7.5px">—</td>`;
+      const vpct = Math.round(vs.compradores/vs.universo*1000)/10;
+      const color = vpct>=50?'#1B7F3A':vpct>=25?'#D97706':'#B01020';
+      return `<td style="text-align:center;font-size:7.5px;font-weight:700;color:${color}">${vpct}%</td>`;
+    }).join('');
+    const gColor = st.pct>=50?'#1B7F3A':st.pct>=25?'#D97706':'#B01020';
+    return `<tr style="background:${i%2?'#F8FAFF':'#fff'}">
+      <td style="width:${COL_SEG}px;padding:3px 5px;font-size:9px;font-weight:700">${escapeHtmlSeg(n)} <small style="font-weight:400;color:#6b7280">(${nprod} prod.)</small></td>
+      <td style="width:${COL_GLOB}px;text-align:center;padding:3px 2px">
+        <span style="font-size:10px;font-weight:800;color:${gColor}">${st.pct}%</span>
+        <br><small style="font-size:6.5px;color:#6b7280">${st.compradores}/${st.universo}</small>
+      </td>
+      ${celdas}
+    </tr>`;
+  }).join('');
+  const productosDetalle = nombres.map(n=>{
+    const codes = _segGrupoConfig(n).productos;
+    const nombresProd = codes.map(cod=>{ const p=catAllG[cod]; return p?p.descripcion:('#'+cod); });
+    return `<div style="font-size:8.5px;margin-top:3px"><b>${escapeHtmlSeg(n)}:</b> ${nombresProd.map(escapeHtmlSeg).join(', ')}</div>`;
+  }).join('');
+  const anchoTabla = COL_SEG+COL_GLOB+COL_VEND*(vendCods.length||1);
+  const html = `<div class="informe-block print-page" style="width:${anchoTabla+28}px;background:#fff;font-family:Arial,Helvetica,sans-serif;padding:14px">
+    <div style="background:#001F58;color:#fff;text-align:center;padding:10px;border-radius:6px 6px 0 0">
+      <div style="font-size:14px;font-weight:800">GRUPOS PERSONALIZADOS — COBERTURA GLOBAL Y POR VENDEDOR</div>
+      <div style="font-size:10px;opacity:.8">${(D.config&&D.config.corte)||''} · ${nombres.length} grupos · universo total: ${_segUniversoTodos().length} clientes</div>
+    </div>
+    ${nombres.length?`<table style="border-collapse:collapse;table-layout:fixed;font-size:9px;margin-top:8px">
+      <thead><tr style="background:#2A3F6F;color:#fff">
+        <th style="width:${COL_SEG}px;padding:3px 5px;text-align:left;font-size:8px">Grupo</th>
+        <th style="width:${COL_GLOB}px;padding:3px 2px;font-size:8px">Global</th>
+        ${headerVend}
+      </tr></thead>
+      <tbody>${filas}</tbody>
+    </table>
+    <div style="margin-top:12px;font-size:11px;font-weight:800;color:#001F58">Detalle de productos por grupo</div>
+    ${productosDetalle}`:'<div style="padding:20px;text-align:center;color:#6b7280;font-size:11px">Todavía no hay grupos con productos y datos de cobertura.</div>'}
+    <div style="text-align:center;font-size:8px;color:#9CA3AF;margin-top:10px">Generado el ${new Date().toLocaleDateString('es-AR')} — Arcor Consumo Masivo · San Francisco - Sastre</div>
+  </div>`;
+  document.getElementById('informe-cobertura-grupos').innerHTML = html;
+}
+async function descargarCoberturaGruposPDF(){
+  const btn = event?.target?.closest('button');
+  if(btn){ btn._origTxt=btn.innerHTML; btn.innerHTML='⏳'; btn.disabled=true; }
+  try{
+    buildInformeCoberturaGrupos();
+    const el = document.getElementById('informe-cobertura-grupos');
+    el.style.display='inline-block';
+    const canvas = await html2canvas(el, {scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
+    el.style.display='none';
+    const pdf = _pdfAjustadoDeCanvas(canvas, true);
+    pdf.save('cobertura_grupos_personalizados.pdf');
+    mostrarToast('PDF descargado.');
+  }catch(err){
+    console.error('descargarCoberturaGruposPDF:',err);
     mostrarToast('Error al generar el PDF. Intentá de nuevo.');
   }finally{
     if(btn){ btn.innerHTML=btn._origTxt||'⬇️'; btn.disabled=false; }
