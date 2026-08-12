@@ -6911,6 +6911,35 @@ function segToggleExpandido(nombre){
   renderSegPanel();
 }
 
+function segBuscarProductoAgregar(nombre, idx){
+  const inp = document.getElementById('seg-add-input-'+idx);
+  const wrap = document.getElementById('seg-add-results-'+idx);
+  if(!inp||!wrap) return;
+  const q = inp.value.toLowerCase().trim();
+  if(!q || q.length<2){ wrap.style.display='none'; wrap.innerHTML=''; return; }
+  const cfg = _segConfig(nombre);
+  const cat = _segCatalogoProductos();
+  const resultados = Object.values(cat).filter(p=>{
+    if(cfg.productosEstrella.includes(p.articulo)) return false;
+    const desc = (p.descripcion||'').toLowerCase();
+    return desc.includes(q) || String(p.articulo).includes(q);
+  }).sort((a,b)=>(a.descripcion||'').localeCompare(b.descripcion||'','es')).slice(0,15);
+  if(!resultados.length){
+    wrap.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#6b7280">Sin resultados.</div>';
+    wrap.style.display='block';
+    return;
+  }
+  wrap.innerHTML = resultados.map(p=>`
+    <div onclick="segAgregarProductoSuelto('${escAttrSeg(nombre)}', ${p.articulo})"
+      style="padding:7px 10px;font-size:12.5px;border-bottom:1px solid #f3f4f6;cursor:pointer">
+      ${escapeHtmlSeg(p.descripcion||('#'+p.articulo))} <small style="color:#6b7280">#${p.articulo}${p.segmento?(' · seg. actual: '+escapeHtmlSeg(p.segmento)):' · sin segmento asignado'}</small>
+    </div>`).join('');
+  wrap.style.display='block';
+}
+function segAgregarProductoSuelto(nombre, codigo){
+  segToggleProductoEstrella(nombre, codigo);
+}
+
 function renderSegPanel(){
   const el = document.getElementById('segsel-panel');
   if(!el) return;
@@ -6927,18 +6956,24 @@ function renderSegPanel(){
       }).join('')
     : '<span class="muted" style="font-size:12px">Todavía no agregaste clientes a la lista de visita.</span>';
 
-  const segCheckboxes = Object.keys(D.segMap||{}).sort((a,b)=>a.localeCompare(b,'es')).map(nombre=>{
+  const segCheckboxes = Object.keys(D.segMap||{}).sort((a,b)=>a.localeCompare(b,'es')).map((nombre, idx)=>{
     const cfg = _segConfig(nombre);
     const prods = _segProductosDe(nombre);
-    const nprod = prods.length;
+    const catAll = _segCatalogoProductos();
+    const manualCodes = cfg.productosEstrella.filter(cod=>!prods.some(p=>p.articulo===cod));
+    const manualProds = manualCodes.map(cod=>catAll[cod]).filter(Boolean);
+    const todosProds = prods.concat(manualProds);
+    const nprod = todosProds.length;
     const nElegidos = cfg.productosEstrella.length;
     const expandido = !!(window._segExpandido && window._segExpandido[nombre]);
-    const chips = prods.slice(0,60).map(p=>{
+    const chips = todosProds.slice(0,60).map(p=>{
       const on = cfg.productosEstrella.includes(p.articulo);
+      const suelto = manualCodes.includes(p.articulo);
       return `<button onclick="event.preventDefault();segToggleProductoEstrella('${escAttrSeg(nombre)}',${p.articulo})"
+        title="${suelto?'Agregado a mano (no tiene este segmento asignado en la lista de precios)':''}"
         style="border:1px solid ${on?'#F0B429':'#dee2e6'};background:${on?'#FFF6DF':'#fff'};color:${on?'#C98A00':'#374151'};
         border-radius:14px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:${on?'700':'500'}">
-        ${on?'⭐ ':''}${escapeHtmlSeg(p.descripcion||('#'+p.articulo))}
+        ${on?'⭐ ':''}${suelto?'🔗 ':''}${escapeHtmlSeg(p.descripcion||('#'+p.articulo))}
       </button>`;
     }).join('');
     return `<div style="border-bottom:1px solid #F1F3F5">
@@ -6949,9 +6984,15 @@ function renderSegPanel(){
         <button title="Marcar como estrella" onclick="event.preventDefault();segToggleEstrella('${escAttrSeg(nombre)}');" style="background:none;border:1px solid ${cfg.estrella?'#F0B429':'#dee2e6'};border-radius:5px;cursor:pointer;font-size:12px;padding:2px 6px">${cfg.estrella?'⭐':'☆'}</button>
         <button title="Ver / elegir productos" onclick="event.preventDefault();segToggleExpandido('${escAttrSeg(nombre)}');" style="background:none;border:1px solid #dee2e6;border-radius:5px;cursor:pointer;font-size:11px;padding:2px 7px">${expandido?'▲ ocultar':'▼ productos'}</button>
       </label>
-      ${expandido?`<div style="padding:4px 6px 12px 28px;display:flex;flex-wrap:wrap;gap:5px">
-        ${chips || '<small style="color:#6b7280">Este segmento no tiene productos cargados en las listas.</small>'}
-        ${prods.length>60?`<small style="color:#6b7280;width:100%">... y ${prods.length-60} más (buscá en Precios para verlos todos)</small>`:''}
+      ${expandido?`<div style="padding:4px 6px 12px 28px">
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+          ${chips || '<small style="color:#6b7280">Este segmento no tiene productos cargados en las listas.</small>'}
+          ${todosProds.length>60?`<small style="color:#6b7280;width:100%">... y ${todosProds.length-60} más (buscá en Precios para verlos todos)</small>`:''}
+        </div>
+        <div style="position:relative;max-width:340px">
+          <input type="text" id="seg-add-input-${idx}" placeholder="+ Agregar producto suelto (nombre o código)..." style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:12px" oninput="segBuscarProductoAgregar('${escAttrSeg(nombre)}', ${idx})">
+          <div id="seg-add-results-${idx}" style="position:absolute;top:calc(100% + 3px);left:0;right:0;background:#fff;border:1px solid #d1d5db;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;z-index:60;display:none"></div>
+        </div>
       </div>`:''}
     </div>`;
   }).join('');
