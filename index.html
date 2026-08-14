@@ -773,6 +773,48 @@ function xlsHandleFile(file){
           if(va) v.divisiones=buildDivs(va);
         });
 
+        // ── HOJA: rutas → reconstruir universo de Tarea (agrega clientes nuevos) ──
+        // D.tasks nunca se reconstruía desde acá: solo se actualizaban los números
+        // (kg25/kg26/no_compro) de los clientes que YA estaban en las listas por
+        // vendedor/día, así que un cliente nuevo en "rutas" nunca aparecía en Tarea,
+        // Materiales de visita ni en las búsquedas de Segmentación. Ahora, antes de
+        // actualizar esos números, agregamos las filas de "rutas" que todavía no
+        // están en newD.tasks (sin tocar las que ya existían).
+        var rutas=toArr("rutas");
+        if(rutas&&rutas.length>1){
+          if(!newD.tasks) newD.tasks={};
+          var ORDEN_DIAS={lunes:1,martes:2,miercoles:3,'miércoles':3,jueves:4,viernes:5,sabado:6,'sábado':6,domingo:7};
+          // Paso 1: juntar todos los días por cliente (un cliente puede visitarse más de un día)
+          var diasPorCliente={};
+          var filasRutaValidas=[];
+          for(var rri=1; rri<rutas.length; rri++){
+            var rrow=rutas[rri]; if(!rrow||rrow[2]==null||rrow[2]==='') continue;
+            var rVend=String(rrow[0]||'').trim().padStart(3,'0');
+            var rCod=String(rrow[2]).trim().padStart(10,'0');
+            var rNombre=String(rrow[3]||'').trim();
+            var rCanal=String(rrow[6]||'').trim();
+            var rDia=String(rrow[7]||'').trim().toLowerCase();
+            if(!rVend||rVend==='000'||!rCod||!rDia) continue;
+            filasRutaValidas.push({vend:rVend,cod:rCod,nombre:rNombre,canal:rCanal,dia:rDia});
+            var keyCli=rVend+'·'+rCod;
+            if(!diasPorCliente[keyCli]) diasPorCliente[keyCli]=new Set();
+            diasPorCliente[keyCli].add(rDia);
+          }
+          // Paso 2: agregar a newD.tasks las combinaciones vendedor/día/cliente que falten
+          var nuevosRuta=0;
+          filasRutaValidas.forEach(function(f){
+            if(!newD.tasks[f.vend]) newD.tasks[f.vend]={};
+            if(!newD.tasks[f.vend][f.dia]) newD.tasks[f.vend][f.dia]=[];
+            var yaEsta=newD.tasks[f.vend][f.dia].some(function(x){return String(x.cod||'').padStart(10,'0')===f.cod;});
+            if(!yaEsta){
+              var diasCli=Array.from(diasPorCliente[f.vend+'·'+f.cod]).sort(function(a,b){return (ORDEN_DIAS[a]||9)-(ORDEN_DIAS[b]||9);});
+              newD.tasks[f.vend][f.dia].push({cod:f.cod, nombre:f.nombre, canal:f.canal, dias:diasCli});
+              nuevosRuta++;
+            }
+          });
+          log('✅ rutas: '+filasRutaValidas.length+' filas revisadas, '+nuevosRuta+' clientes nuevos agregados a Tarea',73);
+        }
+
         // Actualizar no_compro en tasks desde kgTodos
         if(newD.tasks){
           Object.keys(newD.tasks).forEach(function(vend){
