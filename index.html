@@ -13738,6 +13738,11 @@ function _comodatoContratoHTML(datos){
   var P = function(txt){ return '<p style="text-align:justify;font-size:10.3px;line-height:1.55;margin:0 0 9px 0">'+txt+'</p>'; };
   var e = escapeHtmlSeg;
   return '<div class="informe-block print-page" style="width:700px;background:#fff;font-family:Georgia,\'Times New Roman\',Times,serif;padding:44px 50px;color:#111">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #001F58">'
+      + '<svg width="22" height="22" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" fill="#001F58"></path></svg>'
+      + '<div><div style="font-family:Georgia,serif;font-weight:800;font-size:15px;color:#001F58;letter-spacing:.3px">RIMSA <span style="color:#B08900">·</span> Arcor</div>'
+      + '<div style="font-size:8.5px;color:#6b7280">Consumo Masivo · San Francisco - Sastre</div></div>'
+    + '</div>'
     + '<div style="text-align:center;font-weight:800;font-size:15px;margin-bottom:4px;text-decoration:underline;letter-spacing:.5px">CONTRATO DE COMODATO</div>'
     + '<div style="text-align:right;font-size:10.5px;margin-bottom:16px">Nro '+e(datos.nro)+'</div>'
     + P('Entre la firma RIM S. A., por un lado, que en lo sucesivo se denominará &ldquo;EL COMODANTE&rdquo; y por la otra el/la señor/a <b>'+e(datos.comodatario)+'</b> en adelante &ldquo;EL COMODATARIO&rdquo;, convienen en celebrar el presente contrato de comodato, que se regirá por las cláusulas y condiciones siguientes:')
