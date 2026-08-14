@@ -6783,6 +6783,27 @@ function guardarEditorDatosPago(){
   mostrarToast('✅ Datos de pago actualizados');
 }
 
+window._comodatoState = window._comodatoState || {firmados:{}, proximoNro:1, ultimoGenerado:{}};
+async function jbinGuardarComodato(){
+  try{
+    await fetch(SUPA_URL+'/rest/v1/rimsa_data',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'resolution=merge-duplicates'},
+      body:JSON.stringify({id:7, data: window._comodatoState})
+    });
+  }catch(e){ if(location.protocol!=='file:') console.warn('jbinGuardarComodato:', e.message); }
+}
+async function jbinCargarComodato(){
+  try{
+    const res = await fetch(SUPA_URL+'/rest/v1/rimsa_data?id=eq.7&select=data',{
+      headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}
+    });
+    if(!res.ok) return null;
+    const rows = await res.json();
+    return rows && rows.length ? (rows[0].data||null) : null;
+  }catch(e){ if(location.protocol!=='file:') console.warn('jbinCargarComodato:', e.message); return null; }
+}
+
 window._vendorOverrides = window._vendorOverrides || {};
 async function jbinGuardarVendorOverrides(){
   try{
@@ -10684,6 +10705,7 @@ setTimeout(async function(){
       try{ var de=document.querySelector(".h-date"); if(de && cloud.config && cloud.config.corte) de.textContent="Corte: "+cloud.config.corte; }catch(e){}
       try{ var vo = await jbinCargarVendorOverrides(); if(vo) window._vendorOverrides = vo; }catch(e){}
       try{ var dp = await jbinCargarDatosPago(); if(dp) window._datosPago = Object.assign({}, window._DATOS_PAGO_DEFAULT, dp); }catch(e){}
+      try{ var cmd = await jbinCargarComodato(); if(cmd) window._comodatoState = Object.assign({firmados:{}, proximoNro:1, ultimoGenerado:{}}, cmd); }catch(e){}
       try{if(window.builtTabs)Object.keys(window.builtTabs).forEach(function(k){window.builtTabs[k]=false;});}catch(e){}
       try{var at=document.querySelector('.tab.active');if(at)at.click();}catch(e){}
     }
@@ -13392,7 +13414,7 @@ function _matProcesarWorkbook(wb) {
         var v26_helado = 0;
         regs.forEach(function(r){ if (CAT_FREEZER[r.cat]) v26_helado += (r.v26||0); });
 
-        var entry = {cod:cod, nom:info.nom, loc:info.loc, prov:info.prov, vend:vend, mats:matsOut, v26_helado:Math.round(v26_helado*100)/100};
+        var entry = {cod:cod, nom:info.nom, loc:info.loc, prov:info.prov, dir:info.dir||'', vend:vend, mats:matsOut, v26_helado:Math.round(v26_helado*100)/100};
         if (plataformaOut) entry.plataforma = plataformaOut;
         CLI.push(entry);
       });
@@ -13574,6 +13596,7 @@ function _matRenderLista() {
         + '<th style="padding:9px 8px;text-align:right">Mes Actual</th>'
         + '<th style="padding:9px 8px;text-align:right">Mes AA</th>'
         + '<th style="padding:9px 8px;text-align:right">Var%</th>'
+        + '<th style="padding:9px 8px;text-align:center">Comodato</th>'
       + '</tr></thead>'
       + '<tbody id="mat-tbody"></tbody>'
       + '</table></div>'
@@ -13611,7 +13634,7 @@ function filtrarMat() {
         var desc = (m.desc||'').toLowerCase();
         if (q && nom.indexOf(q) < 0 && desc.indexOf(q) < 0) return;
         var vname = (c.vend||'').replace(/^\d+\s*-?\s*/,'').trim();
-        rows.push({desc: m.desc + (m.qty>1?' (×'+m.qty+')':''), nom: c.nom, loc: c.loc||'', vend: vname, v26:m.v26, v25:m.v25, varp:m.var, qty:m.qty||1});
+        rows.push({desc: m.desc + (m.qty>1?' (×'+m.qty+')':''), rawDesc: m.desc, cod: c.cod, dir: c.dir||'', nom: c.nom, loc: c.loc||'', vend: vname, v26:m.v26, v25:m.v25, varp:m.var, qty:m.qty||1});
       });
     });
   }
@@ -13627,12 +13650,214 @@ function filtrarMat() {
       + '<td style="padding:7px 8px;text-align:right;font-weight:600">'+_matFmt(r.v26)+'</td>'
       + '<td style="padding:7px 8px;text-align:right;color:#6b7280">'+_matFmt(r.v25)+'</td>'
       + '<td style="padding:7px 8px;text-align:right">'+_matFmtV(r.varp,r.v25,r.v26)+'</td>'
+      + '<td style="padding:7px 8px;text-align:center;white-space:nowrap">'+_matComodatoCellHtml(r)+'</td>'
       + '</tr>';
   }).join('');
   var tbody = document.getElementById('mat-tbody');
-  if (tbody) tbody.innerHTML = html || '<tr><td colspan="7" style="text-align:center;padding:30px;color:#999">Sin resultados</td></tr>';
+  if (tbody) tbody.innerHTML = html || '<tr><td colspan="8" style="text-align:center;padding:30px;color:#999">Sin resultados</td></tr>';
   var cnt = document.getElementById('mat-count');
   if (cnt) cnt.textContent = 'Mostrando ' + rows.length + ' de ' + total + ' materiales';
+}
+
+// ════════════════ RANKING ════════════════
+
+// ════════════════ COMODATOS ════════════════
+// Estado (firmado sí/no + numeración) persiste en Supabase (id=7), igual patrón
+// que segmentación (id=4), overrides de vendedor (id=5) y datos de pago (id=6).
+function _matComodatoCellHtml(r){
+  if(!r.cod || !r.rawDesc) return '<span style="color:#9CA3AF;font-size:10px">—</span>';
+  var key = r.cod+'·'+r.rawDesc;
+  var firmado = !!(window._comodatoState && window._comodatoState.firmados && window._comodatoState.firmados[key]);
+  return '<label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;font-size:9px;color:#374151" title="Comodato firmado">'
+    + '<input type="checkbox" '+(firmado?'checked':'')+' onchange="toggleComodatoFirmado(\''+escAttrSeg(r.cod)+'\',\''+escAttrSeg(r.rawDesc)+'\')"> firmado'
+    + '</label>'
+    + '<button onclick="abrirModalComodato(\''+escAttrSeg(r.cod)+'\',\''+escAttrSeg(r.rawDesc)+'\')" title="Generar PDF de comodato" style="background:#374151;color:#fff;border:none;border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer;margin-left:5px">📄</button>';
+}
+function toggleComodatoFirmado(cod, rawDesc){
+  if(!window._comodatoState) window._comodatoState = {firmados:{}, proximoNro:1, ultimoGenerado:{}};
+  if(!window._comodatoState.firmados) window._comodatoState.firmados = {};
+  var key = cod+'·'+rawDesc;
+  window._comodatoState.firmados[key] = !window._comodatoState.firmados[key];
+  jbinGuardarComodato();
+  mostrarToast(window._comodatoState.firmados[key] ? '✅ Marcado como firmado' : 'Marcado como no firmado');
+  filtrarMat();
+}
+function abrirModalComodato(cod, rawDesc){
+  var c = window._CONMAP && window._CONMAP[String(parseInt(cod))];
+  if(!c){ mostrarToast('No encontré los datos de ese cliente.'); return; }
+  if(!window._comodatoState) window._comodatoState = {firmados:{}, proximoNro:1, ultimoGenerado:{}};
+  var domicilioSugerido = [c.dir, c.loc].filter(Boolean).join(', ');
+  var modal = document.getElementById('comodato-modal');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'comodato-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(modal);
+  }
+  var field = function(id,label,value,ph){
+    return '<div style="margin-bottom:10px">'
+      + '<label style="display:block;font-size:11.5px;font-weight:600;color:#374151;margin-bottom:3px">'+label+'</label>'
+      + '<input type="text" id="'+id+'" value="'+String(value||'').replace(/"/g,'&quot;')+'" placeholder="'+(ph||'')+'" '
+      + 'style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:7px 9px;font-size:13px;box-sizing:border-box">'
+      + '</div>';
+  };
+  modal.innerHTML =
+    '<div style="background:#fff;border-radius:14px;width:100%;max-width:460px;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:\'DM Sans\',sans-serif;margin:auto">'
+    + '<div style="background:linear-gradient(135deg,#001F58,#003DA5);color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0">'
+    +   '<div style="font-family:\'Syne\',sans-serif;font-weight:800;font-size:14px">📄 Generar Comodato</div>'
+    +   '<button onclick="cerrarModalComodato()" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>'
+    + '</div>'
+    + '<div style="padding:16px 18px">'
+    +   '<div style="background:#F3F4F6;border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12.5px">'
+    +     '<b>'+escapeHtmlSeg(c.nom)+'</b><br><span style="color:#6b7280">'+escapeHtmlSeg(rawDesc)+'</span>'
+    +   '</div>'
+    +   field('cmd-nro','Número de contrato', window._comodatoState.proximoNro)
+    +   field('cmd-domicilio','Domicilio del punto de venta / cliente', domicilioSugerido, 'Calle y número, localidad')
+    +   field('cmd-telefono','Teléfono (opcional)', '', 'Dejar en blanco si no lo tenés')
+    +   field('cmd-serie','Número de serie / rótulo', '', 'Opcional')
+    +   field('cmd-metros','Metros lineales', '', 'Opcional')
+    +   field('cmd-imagen','Imagen (referencia)', '', 'Opcional')
+    +   field('cmd-valor','Valor de reposición ($)', '', 'Opcional')
+    + '</div>'
+    + '<div style="padding:12px 18px;border-top:1px solid #E5E7EB;display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button onclick="cerrarModalComodato()" style="background:#F3F4F6;color:#374151;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Cancelar</button>'
+    +   '<button onclick="generarComodatoPDF(\''+escAttrSeg(cod)+'\',\''+escAttrSeg(rawDesc)+'\')" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">⬇️ Descargar PDF</button>'
+    + '</div></div>';
+  modal.style.display = 'flex';
+}
+function cerrarModalComodato(){
+  var modal = document.getElementById('comodato-modal');
+  if(modal) modal.style.display = 'none';
+}
+function _comodatoTextoFecha(d){
+  var meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  return d.getDate()+' de '+meses[d.getMonth()]+' de '+d.getFullYear();
+}
+function _comodatoContratoHTML(datos){
+  var fecha = _comodatoTextoFecha(new Date());
+  var P = function(txt){ return '<p style="text-align:justify;font-size:10.3px;line-height:1.55;margin:0 0 9px 0">'+txt+'</p>'; };
+  var e = escapeHtmlSeg;
+  return '<div class="informe-block print-page" style="width:700px;background:#fff;font-family:Georgia,\'Times New Roman\',Times,serif;padding:44px 50px;color:#111">'
+    + '<div style="text-align:center;font-weight:800;font-size:15px;margin-bottom:4px;text-decoration:underline;letter-spacing:.5px">CONTRATO DE COMODATO</div>'
+    + '<div style="text-align:right;font-size:10.5px;margin-bottom:16px">Nro '+e(datos.nro)+'</div>'
+    + P('Entre la firma RIM S. A., por un lado, que en lo sucesivo se denominará &ldquo;EL COMODANTE&rdquo; y por la otra el/la señor/a <b>'+e(datos.comodatario)+'</b> en adelante &ldquo;EL COMODATARIO&rdquo;, convienen en celebrar el presente contrato de comodato, que se regirá por las cláusulas y condiciones siguientes:')
+    + P('<b>PRIMERO:</b> El Comodante entrega en este acto en Comodato al Comodatario, según las prescripciones del art. 2255 y siguientes del Cód. Civil el siguiente bien: <b>'+e(datos.bien)+'</b>, número de serie / rótulo: '+e(datos.serie||'')+', metros lineales: '+e(datos.metros||'')+' e imagen: '+e(datos.imagen||'')+'.')
+    + P('<b>SEGUNDO:</b> El destino que el Comodatario deberá asignarle al bien que recibe en Comodato, será para utilizarlo como exhibidor para golosinas, chocolates y galletas dentro del punto de venta con domicilio en la calle '+e(datos.domicilioPV||'')+'.')
+    + P('<b>TERCERO:</b> Queda expresamente establecido que el Comodatario deberá utilizar el bien que recibe para exhibir y comercializar exclusivamente productos con las marcas de titularidad de ARCOR S.A.I.C., los que deberá comprar y vender por su cuenta y riesgo. El no cumplimiento de esta disposición por parte del Comodatario, será causa de rescisión automática del presente contrato.')
+    + P('<b>CUARTO:</b> Será exclusivo cargo del Comodatario el mantenimiento y buen uso de los bienes que recibe en Comodato, debiendo a tal efecto utilizarlos cuidadosamente y por el personal habilitado y de su dependencia, no pudiendo en ningún supuesto, reclamar compensación y/o indemnización alguna.')
+    + P('<b>QUINTO:</b> Si se produjera el deterioro del bien, causado por culpa, negligencia o uso indebido del Comodatario, será a su exclusivo cargo los gastos que ocasione la reparación. Si se perdiera o destruyera el bien, por culpa, negligencia o uso indebido del Comodatario, este estará obligado a abonar al Comodante el precio total del mismo, el valor de reposición se fija en $ '+e(datos.valorRepo||'')+'.')
+    + P('<b>SEXTO:</b> El Comodatario concede a favor del Comodante un derecho de exclusividad en la Venta, Exhibición y Promoción de los productos en la forma y lugares indicados en la cláusula tercera del presente y en consecuencia no podrá otorgar iguales o similares derechos a los acá pactados a otras firmas que compitan en la fabricación y/o comercialización y venta que el Comodante fábrica o comercializa.')
+    + P('<b>SEPTIMO:</b> El Comodatario autoriza al Comodante a efectuar promociones o sampling de productos en los lugares indicados en la cláusula segunda del presente, sin costo alguno para el Comodante.')
+    + P('<b>OCTAVO:</b> El Comodante, proveerá al Comodatario solamente los productos que cuenten con las autorizaciones de venta otorgadas por los organismos competentes y que sean aptos para el consumo únicamente.')
+    + P('<b>NOVENO:</b> Se establece que en cuanto a la colocación en el bien entregado, de accesorios, pop y todo tipo de material de Merchandising que ayude a la mejor identificación y promoción de los productos, serán exclusivamente aquellos previstos por el Comodante.')
+    + P('<b>DECIMO:</b> El Comodatario se compromete por medio del presente a no presentar ningún tipo de impedimento para que la gente del departamento de promoción del Comodante o de su canal de distribución, realice trabajos sobre el bien. (Limpieza y ordenamiento de productos, colocación de material, etc.).')
+    + P('<b>DECIMO PRIMERO:</b> El Comodatario responderá ante el Comodante aún ante casos fortuitos y fuerza mayor, debiendo restituir los bienes en perfecto estado de construcción y funcionamiento como le fuera entregado, salvo el desgaste normal ocasionado por el buen uso y el transcurso del tiempo.')
+    + P('<b>DECIMO SEGUNDO:</b> El plazo de vigencia se establece en veinticuatro (24) meses, contados a partir de la fecha de la firma del presente, sin perjuicio de ello, el Comodante, podrá rescindir el presente contrato, en cualquier momento, sin necesidad de justificar la causa, debiendo en tal supuesto el Comodatario restituir el bien objeto del Contrato, dentro de los diez días de notificado.')
+    + P('<b>DECIMO TERCERO:</b> El Comodatario no podrá colocar ningún tipo de material de merchandising de la competencia, ni ningún exhibidor en el espacio aéreo que obstaculice la visual del bien.')
+    + P('<b>DECIMO CUARTO:</b> El presente Contrato de Comodato es intransferible, quedando expresamente prohibida la cesión total o parcial de las obligaciones y derechos derivados del mismo.')
+    + P('<b>DECIMO QUINTO:</b> Las partes acuerdan que con la firma del presente, queda rescindido y sin efecto alguno, cualquier otro contrato de comodato, que hubieran celebrado con anterioridad, referido al mismo bien descripto en la cláusula primera.')
+    + '<div style="text-align:right;font-size:10.5px;margin:2px 0 12px 0">SASTRE, '+fecha+'.</div>'
+    + P('<b>DECIMO SEXTO:</b> En ningún supuesto y bajo ningún concepto podrá el Comodatario retener los bienes que recibe. En caso de cualquier acto jurídico que implique cambio de titularidad, el Comodatario deberá restituir al Comodante el bien objeto del presente Contrato con diez (10) días de anticipación.')
+    + P('<b>DECIMO SEPTIMO:</b> Las partes se someten para dirimir sus controversias a los tribunales ordinarios con asiento en la ciudad de Córdoba, renunciando a cualquier otro fuero y/o jurisdicción que le pudiera corresponder.')
+    + P('Se firman dos (2) ejemplares de un mismo tenor y a un solo efecto, en la ciudad de SASTRE a los ............. de .................................... de ........')
+    + '<div style="display:flex;gap:30px;margin-top:46px">'
+      + '<div style="flex:1;text-align:center">'
+        + '<div style="border-top:1px solid #111;padding-top:4px;font-weight:700;font-size:10.5px">COMODATARIO</div>'
+        + '<div style="margin-top:34px;font-size:10px">Por '+e(datos.comodatario)+'</div>'
+        + '<div style="margin-top:16px;font-size:9.5px;text-align:left">Aclaración: ________________________</div>'
+        + '<div style="margin-top:8px;font-size:9.5px;text-align:left">Domicilio: '+e(datos.domicilio||'')+'</div>'
+        + '<div style="margin-top:8px;font-size:9.5px;text-align:left">Teléfono: '+e(datos.telefono||'')+'</div>'
+      + '</div>'
+      + '<div style="flex:1;text-align:center">'
+        + '<div style="border-top:1px solid #111;padding-top:4px;font-weight:700;font-size:10.5px">COMODANTE</div>'
+        + '<div style="margin-top:34px;font-size:10px">Por RIM S. A.</div>'
+        + '<div style="margin-top:16px;font-size:9.5px;text-align:left">Aclaración: ________________________</div>'
+      + '</div>'
+    + '</div>'
+  + '</div>';
+}
+function buildInformeComodato(datos){
+  var el = document.getElementById('informe-comodato');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'informe-comodato';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = _comodatoContratoHTML(datos);
+}
+// Paginado a tamaño A4 real (210x297mm) — a diferencia de _pdfAjustadoDeCanvas
+// (pensado para tablas anchas que se ajustan al contenido), un contrato tiene
+// que salir en hojas de tamaño estándar para imprimir y archivar.
+function _pdfA4DeCanvas(canvas){
+  const { jsPDF } = window.jspdf;
+  const pageWmm = 210, pageHmm = 297, marginMm = 16;
+  const usableWmm = pageWmm - marginMm*2;
+  const usableHmm = pageHmm - marginMm*2;
+  const ratio = usableWmm / canvas.width;
+  const totalHmm = canvas.height * ratio;
+  const pdf = new jsPDF({orientation:'p', unit:'mm', format:'a4'});
+  if(totalHmm <= usableHmm){
+    pdf.addImage(canvas.toDataURL('image/jpeg',0.95),'JPEG',marginMm,marginMm,usableWmm,totalHmm);
+    return pdf;
+  }
+  const pageSlicePx = usableHmm/ratio;
+  let y=0, pg=0;
+  while(y<canvas.height){
+    const h = Math.min(pageSlicePx, canvas.height-y);
+    if(pg>0) pdf.addPage('a4','p');
+    const sc = document.createElement('canvas');
+    sc.width = canvas.width; sc.height = h;
+    sc.getContext('2d').drawImage(canvas,0,-y,canvas.width,canvas.height);
+    pdf.addImage(sc.toDataURL('image/jpeg',0.95),'JPEG',marginMm,marginMm,usableWmm,h*ratio);
+    y+=h; pg++;
+  }
+  return pdf;
+}
+async function generarComodatoPDF(cod, rawDesc){
+  var c = window._CONMAP && window._CONMAP[String(parseInt(cod))];
+  if(!c){ mostrarToast('No encontré los datos de ese cliente.'); return; }
+  if(!window._comodatoState) window._comodatoState = {firmados:{}, proximoNro:1, ultimoGenerado:{}};
+  var $ = function(id){ var el = document.getElementById(id); return el ? el.value : ''; };
+  var nro = $('cmd-nro') || window._comodatoState.proximoNro || 1;
+  var domicilio = $('cmd-domicilio');
+  var datos = {
+    nro: nro,
+    comodatario: c.nom,
+    bien: rawDesc,
+    serie: $('cmd-serie'),
+    metros: $('cmd-metros'),
+    imagen: $('cmd-imagen'),
+    domicilioPV: domicilio,
+    domicilio: domicilio,
+    telefono: $('cmd-telefono'),
+    valorRepo: $('cmd-valor')
+  };
+  var btn = event?.target?.closest('button');
+  if(btn){ btn._origTxt=btn.innerHTML; btn.innerHTML='⏳'; btn.disabled=true; }
+  try{
+    buildInformeComodato(datos);
+    var el = document.getElementById('informe-comodato');
+    el.style.display='inline-block';
+    var canvas = await html2canvas(el, {scale:2.5,useCORS:true,backgroundColor:'#ffffff',logging:false});
+    el.style.display='none';
+    var pdf = _pdfA4DeCanvas(canvas);
+    var nombreArchivo = 'comodato_'+String(c.nom||'cliente').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40)+'.pdf';
+    pdf.save(nombreArchivo);
+    if(String(nro)===String(window._comodatoState.proximoNro)){
+      window._comodatoState.proximoNro = (parseInt(window._comodatoState.proximoNro)||0) + 1;
+    }
+    if(!window._comodatoState.ultimoGenerado) window._comodatoState.ultimoGenerado = {};
+    window._comodatoState.ultimoGenerado[cod+'·'+rawDesc] = {fecha: new Date().toISOString(), nro: nro};
+    jbinGuardarComodato();
+    cerrarModalComodato();
+    mostrarToast('✅ PDF de comodato descargado');
+  }catch(err){
+    console.error('generarComodatoPDF:', err);
+    mostrarToast('Error al generar el PDF. Intentá de nuevo.');
+  }finally{
+    if(btn){ btn.innerHTML=btn._origTxt||'⬇️ Descargar PDF'; btn.disabled=false; }
+  }
 }
 
 // ════════════════ RANKING ════════════════
