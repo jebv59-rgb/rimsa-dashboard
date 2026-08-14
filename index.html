@@ -13362,7 +13362,7 @@ function _matProcesarWorkbook(wb) {
         if (!m) return;
         var cod = m[1].replace(/^0+/,'') || '0';
         var nom = m[2].trim();
-        if (!matsPorCliente[cod]) matsPorCliente[cod] = {nom:nom, loc:row[8]||'', prov:row[9]||'', dir:row[7]||'', mats:[]};
+        if (!matsPorCliente[cod]) matsPorCliente[cod] = {nom:nom, dir:row[6]||'', loc:row[7]||'', prov:row[8]||'', mats:[]};
         matsPorCliente[cod].mats.push({desc:desc, tipo:tipo});
       });
 
