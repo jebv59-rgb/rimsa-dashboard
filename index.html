@@ -667,10 +667,15 @@ function xlsHandleFile(file){
         var patCli=/\((\d{7,12})\)/;
         var patSub=/^(\d{4})\s*-\s*/;
         var patVend3=/^(\d{3})\s*-\s*/;
-        var patDiv2=/^(\d{2})\s*-\s*/;
+        var patDiv2=/^(\d{2})\s*-\s*(.+)$/;
         var DIV_MAP={'01':'GOLOSINAS','03':'ALIMENTOS','08':'ALIMENTOS','10':'CHOCOLATES','12':'HARINAS'};
         var HELADO_SUBS={'0120':true,'0165':true};
         var DIVS=['GOLOSINAS','ALIMENTOS','CHOCOLATES','HARINAS','HELADOS'];
+        // Nombres de división conocidos: distinguen una fila "NN - DIVISIÓN" real de una fila
+        // "NN - Línea de producto" (mismo formato de 2 dígitos, pero un nivel más abajo dentro
+        // del sub-rubro desde que la hoja "ventas mobiliarios" empezó a traer el detalle por línea).
+        var DIVISION_NAMES={};
+        Object.keys(DIV_MAP).forEach(function(k){ DIVISION_NAMES[DIV_MAP[k]]=true; });
 
         // Acumuladores globales y por vendedor
         var gAcc={}; DIVS.forEach(function(d){gAcc[d]={kg25:0,kg26:0};});
@@ -690,9 +695,9 @@ function xlsHandleFile(file){
           });
         }
 
-        var curCod=null, curVend=null, curDiv=null;
+        var curCod=null, curVend=null, curDiv=null, curSub=null;
         var kgTodos={}; // cod_10dig → {kg26,kg25}
-        var segComprasSet={}; // cod_10dig → Set(sub-rubro codes comprados este período)
+        var segComprasSet={}; // cod_10dig → Set(sub-rubro codes comprados este período, y también sub-rubro·línea)
 
         for(var ri=4;ri<kgaa.length;ri++){
           var row=kgaa[ri]; if(!row||!row[0]) continue;
@@ -703,7 +708,7 @@ function xlsHandleFile(file){
             curCod=mc[1].padStart(10,'0');
             var norm=mc[1].replace(/^0+/,'')||'0';
             curVend=cliVendMap[norm]||null;
-            curDiv=null;
+            curDiv=null; curSub=null;
             if(!kgTodos[curCod]) kgTodos[curCod]={kg26:0,kg25:0};
             continue;
           }
@@ -716,37 +721,55 @@ function xlsHandleFile(file){
               vAcc[curVend]={};
               DIVS.forEach(function(d){vAcc[curVend][d]={kg25:0,kg26:0};});
             }
+            curSub=null;
             continue;
           }
-          // División padre (fila "01 - GOLOSINAS") — 2 dígitos exactos
-          var md=s.match(patDiv2);
-          if(md&&!patSub.test(s)){curDiv=md[1];continue;}
-          // Sub-rubro (fila "0003 - CARAMELOS DUROS") — 4 dígitos exactos
+          // Sub-rubro (fila "0003 - CARAMELOS DUROS") — 4 dígitos exactos.
+          // Ya no trae los datos directamente: quedaron un nivel más abajo, en la fila de "línea".
           var ms=s.match(patSub);
           if(ms){
-            var sub=ms[1];
-            var divName=(curDiv==='10'&&HELADO_SUBS[sub])?'HELADOS':DIV_MAP[curDiv];
-            var kg26v=parseFloat(row[C26])||0;
-            var kg25v=parseFloat(row[C25])||0;
-            // SIEMPRE acumular en kgTodos (fuente autoritativa para no_compro)
-            if(curCod&&kgTodos[curCod]){
-              kgTodos[curCod].kg26+=kg26v;
-              kgTodos[curCod].kg25+=kg25v;
+            curSub=ms[1];
+            continue;
+          }
+          // División ("01 - GOLOSINAS") o Línea ("02 - RELLENOS ARCOR IMPULSO") — ambas
+          // tienen el mismo formato de 2 dígitos. Si el texto es uno de los nombres de
+          // división conocidos, es división; si no, y venimos de un sub-rubro abierto,
+          // es la fila de línea con los datos reales de venta/KG.
+          var md=s.match(patDiv2);
+          if(md){
+            var nombreTras=(md[2]||'').trim().toUpperCase();
+            if(DIVISION_NAMES[nombreTras]){
+              curDiv=md[1];
+              curSub=null;
+              continue;
             }
-            // Registrar compra del sub-rubro este período (para segCompras / segmentos)
-            var venta26v=parseFloat(row[C26-1])||0;
-            if(curCod&&(kg26v>0||venta26v>0)){
-              if(!segComprasSet[curCod]) segComprasSet[curCod]=new Set();
-              segComprasSet[curCod].add(sub);
-            }
-            // Solo acumular en divisiones si está mapeada
-            if(divName){
-              gAcc[divName].kg26+=kg26v; gAcc[divName].kg25+=kg25v;
-              if(curVend&&vAcc[curVend]){
-                vAcc[curVend][divName].kg26+=kg26v;
-                vAcc[curVend][divName].kg25+=kg25v;
+            if(curSub){
+              var sub=curSub;
+              var divName=(curDiv==='10'&&HELADO_SUBS[sub])?'HELADOS':DIV_MAP[curDiv];
+              var kg26v=parseFloat(row[C26])||0;
+              var kg25v=parseFloat(row[C25])||0;
+              // SIEMPRE acumular en kgTodos (fuente autoritativa para no_compro)
+              if(curCod&&kgTodos[curCod]){
+                kgTodos[curCod].kg26+=kg26v;
+                kgTodos[curCod].kg25+=kg25v;
+              }
+              // Registrar compra del sub-rubro (y del sub-rubro·línea puntual) este período
+              var venta26v=parseFloat(row[C26-1])||0;
+              if(curCod&&(kg26v>0||venta26v>0)){
+                if(!segComprasSet[curCod]) segComprasSet[curCod]=new Set();
+                segComprasSet[curCod].add(sub);
+                segComprasSet[curCod].add(sub+'·'+md[1]);
+              }
+              // Solo acumular en divisiones si está mapeada
+              if(divName){
+                gAcc[divName].kg26+=kg26v; gAcc[divName].kg25+=kg25v;
+                if(curVend&&vAcc[curVend]){
+                  vAcc[curVend][divName].kg26+=kg26v;
+                  vAcc[curVend][divName].kg25+=kg25v;
+                }
               }
             }
+            continue;
           }
         }
 
@@ -874,30 +897,45 @@ function xlsHandleFile(file){
 
         // Construir mapa cod→{kg26_choc,kg26_gol,kg25,segs26,segs25} desde ventas mobiliarios
         var kgBnd={};
-        var curCodBnd=null;
+        var curCodBnd=null, curSegBnd=null;
         for(var rbi=4;rbi<kgaa.length;rbi++){
           var rbrow=kgaa[rbi]; if(!rbrow||!rbrow[0]) continue;
           var rbs=String(rbrow[0]).trim();
           var rmc=rbs.match(/\((\d{7,12})\)/);
           if(rmc&&rbs.indexOf('(')>=0){
             curCodBnd=rmc[1].padStart(10,'0');
+            curSegBnd=null;
             if(!kgBnd[curCodBnd]) kgBnd[curCodBnd]={kg26_choc:0,kg26_gol:0,kg25:0,segs26:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],segs25:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]};
             continue;
           }
           if(!curCodBnd) continue;
+          // Sub-rubro (4 díg.): ya no trae datos, solo abre el contexto para la línea de abajo.
           var rsm=rbs.match(/^(\d{4})\s*-/);
-          if(!rsm) continue;
-          var rseg=rsm[1];
-          var ridx=SEGS_BND.indexOf(rseg);
-          if(ridx<0) continue;
-          var rv26=parseFloat(rbrow[C26])||0;
-          var rv25=parseFloat(rbrow[C25])||0;
-          var rrub=RUBRO_SEG[rseg]||'';
-          kgBnd[curCodBnd].segs26[ridx]+=rv26;
-          kgBnd[curCodBnd].segs25[ridx]+=rv25;
-          kgBnd[curCodBnd].kg25+=rv25;
-          if(rrub==='choc'||rrub==='both') kgBnd[curCodBnd].kg26_choc+=rv26;
-          if(rrub==='gol' ||rrub==='both') kgBnd[curCodBnd].kg26_gol+=rv26;
+          if(rsm){
+            curSegBnd = SEGS_BND.indexOf(rsm[1])>=0 ? rsm[1] : null;
+            continue;
+          }
+          // Fila de 2 dígitos: división real (reinicia contexto) o línea con los datos reales
+          // (solo si hay un sub-rubro relevante abierto).
+          var r2bnd=rbs.match(/^(\d{2})\s*-\s*(.+)$/);
+          if(r2bnd){
+            var nomTrasBnd=(r2bnd[2]||'').trim().toUpperCase();
+            if(DIVISION_NAMES[nomTrasBnd]){
+              curSegBnd=null;
+              continue;
+            }
+            if(!curSegBnd) continue;
+            var ridx=SEGS_BND.indexOf(curSegBnd);
+            if(ridx<0) continue;
+            var rv26=parseFloat(rbrow[C26])||0;
+            var rv25=parseFloat(rbrow[C25])||0;
+            var rrub=RUBRO_SEG[curSegBnd]||'';
+            kgBnd[curCodBnd].segs26[ridx]+=rv26;
+            kgBnd[curCodBnd].segs25[ridx]+=rv25;
+            kgBnd[curCodBnd].kg25+=rv25;
+            if(rrub==='choc'||rrub==='both') kgBnd[curCodBnd].kg26_choc+=rv26;
+            if(rrub==='gol' ||rrub==='both') kgBnd[curCodBnd].kg26_gol+=rv26;
+          }
         }
 
         if(tieneMat){
@@ -13342,6 +13380,24 @@ function _matProcesarWorkbook(wb) {
           if (val && val !== 'Total general') CAT_TO_TIPO[val] = TIPO_COLS[ci];
         });
       });
+      // Gancheras (masti/mogul): miden solo dentro de líneas puntuales, no todo el
+      // sub-rubro. Las columnas D/E anidan sub-rubro (4 díg.) → línea (2 díg.), pero el
+      // código de sub-rubro es inconsistente entre esta hoja y "ventas mobiliarios" (p.ej.
+      // "MAST. MOGUL VALOR IMPULSO" aparece tanto bajo 0002 como bajo 0218 según el cliente).
+      // Por eso se matchea por el nombre completo de la línea (código+texto), que sí es estable.
+      var CAT_LINEA_TO_TIPO = {};
+      var TIPO_COLS_LINEA = {3:'ganchera_masti', 4:'ganchera_mogul'};
+      [3,4].forEach(function(ci) {
+        var vioSubrubro = false;
+        rowsSeg.slice(4).forEach(function(row) {
+          var val = String(row[ci]||'').trim();
+          if (!val || val === 'Total general') return;
+          if (/^\d{4}\s*-\s*/.test(val)) { vioSubrubro = true; return; }
+          if (/^\d{2}\s*-\s*/.test(val) && vioSubrubro) {
+            CAT_LINEA_TO_TIPO[val] = TIPO_COLS_LINEA[ci];
+          }
+        });
+      });
 
       // ── 2. MATERIALES: cliente → lista de materiales ──
       var DESC_TO_TIPO = {
@@ -13367,9 +13423,14 @@ function _matProcesarWorkbook(wb) {
       });
 
       // ── 3. VENTAS MOBILIARIOS (jerárquico) ──
+      // Desde la actualización de la hoja, el sub-rubro (4 díg.) ya no trae los datos:
+      // quedaron un nivel más abajo, en la fila de "línea" (2 díg.) dentro de ese sub-rubro.
+      // Las filas de 2 dígitos son ambiguas (división real vs. línea de producto), se
+      // distinguen por si el nombre coincide con una división conocida.
       var rowsVen = XLSX.utils.sheet_to_json(shVen, {header:1, defval:''});
       var regsPorCliente = {};
-      var curCod=null, curDiv=null, curVend=null;
+      var DIVISION_NAMES_VEN = {GOLOSINAS:1, ALIMENTOS:1, CHOCOLATES:1, HARINAS:1};
+      var curCod=null, curDiv=null, curVend=null, curSubStr=null, curSubCod=null;
       rowsVen.slice(5).forEach(function(row) {
         var c0 = row[0];
         if (c0===null||c0===undefined||c0==='') return;
@@ -13377,19 +13438,26 @@ function _matProcesarWorkbook(wb) {
         if (c0.toLowerCase().indexOf('total')===0) return;
 
         var mCliente = c0.match(/^(.+?)\s*\((\d+)\)$/);
-        var mCategoria = c0.match(/^(\d{4})\s*-\s*(.+)$/);
-        var mDivision = c0.match(/^(\d{2})\s*-\s*(.+)$/);
+        var mSubrubro = c0.match(/^(\d{4})\s*-\s*(.+)$/);
+        var mDosDig = c0.match(/^(\d{2})\s*-\s*(.+)$/);
         var mVendedor = c0.match(/^(\d+)\s*-\s*(.+)$/);
 
         if (mCliente) {
           curCod = mCliente[2].replace(/^0+/,'') || '0';
-          curDiv = null; curVend = null;
-        } else if (mCategoria) {
-          var v25=row[1]||0, kg25=row[2]||0, v26=row[3]||0, kg26=row[4]||0;
-          if (!regsPorCliente[curCod]) regsPorCliente[curCod]=[];
-          regsPorCliente[curCod].push({cat:c0, division:curDiv, vendedor:curVend, v25:v25,kg25:kg25,v26:v26,kg26:kg26});
-        } else if (mDivision && mDivision[1].length===2) {
-          curDiv = mDivision[2].trim();
+          curDiv = null; curVend = null; curSubStr = null; curSubCod = null;
+        } else if (mSubrubro) {
+          curSubStr = c0; curSubCod = mSubrubro[1];
+        } else if (mDosDig) {
+          var nombreTras = (mDosDig[2]||'').trim().toUpperCase();
+          if (DIVISION_NAMES_VEN[nombreTras]) {
+            curDiv = mDosDig[2].trim();
+            curSubStr = null; curSubCod = null;
+          } else if (curSubStr) {
+            var v25=row[1]||0, kg25=row[2]||0, v26=row[3]||0, kg26=row[4]||0;
+            if (!regsPorCliente[curCod]) regsPorCliente[curCod]=[];
+            regsPorCliente[curCod].push({cat:curSubStr, subCat:curSubStr, subCod:curSubCod, linea:mDosDig[1], lineaStr:c0,
+              division:curDiv, vendedor:curVend, v25:v25,kg25:kg25,v26:v26,kg26:kg26});
+          }
         } else if (mVendedor) {
           curVend = mVendedor[2].trim();
         }
@@ -13431,8 +13499,12 @@ function _matProcesarWorkbook(wb) {
             return;
           }
           var v25=0,v26=0,gol25=0,gol26=0,choc25=0,choc26=0;
+          var esLineaTipo = (tipo==='ganchera_masti'||tipo==='ganchera_mogul');
           regs.forEach(function(r) {
-            if (CAT_TO_TIPO[r.cat] !== tipo) return;
+            var matchea = esLineaTipo
+              ? (CAT_LINEA_TO_TIPO[r.lineaStr] === tipo)
+              : (CAT_TO_TIPO[r.subCat||r.cat] === tipo);
+            if (!matchea) return;
             v25+=r.v25; v26+=r.v26;
             var d=(r.division||'').toUpperCase();
             if (d==='GOLOSINAS'){gol25+=r.v25;gol26+=r.v26;}
