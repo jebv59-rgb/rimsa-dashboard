@@ -13635,6 +13635,217 @@ function _matIni(nom) {
   return ((p[0]||'')[0]||'') + ((p[1]||'')[0]||'');
 }
 
+// ════════════════ NO COMPRADORES (por material) ════════════════
+// Clientes que tienen un material asignado pero no compraron en el período actual
+// (v26 == 0 para ese material). Se arma sobre los mismos datos de la Lista (window._CONCESIONES
+// / window._PLATDET), no depende de una carga aparte.
+function _matNoCompradores(tipoFiltro, vendFiltro){
+  var con = window._CONCESIONES || [];
+  var plat = window._PLATDET || [];
+  var out = [];
+  if (!tipoFiltro || tipoFiltro==='plataforma') {
+    plat.forEach(function(p){
+      if (vendFiltro && (p.vend||'') !== vendFiltro) return;
+      if (p.total26>0) return;
+      var vname = (p.vend||'').replace(/^\d+\s*-?\s*/,'').trim();
+      out.push({desc:_matPlatLabel(p.material), tipo:'plataforma', cod:p.cod||'', nom:p.nombre||'', loc:p.localidad||'', vend:vname, vendRaw:p.vend||'', v25:p.total25||0});
+    });
+  }
+  if (tipoFiltro !== 'plataforma') {
+    con.forEach(function(c){
+      if (vendFiltro && (c.vend||'') !== vendFiltro) return;
+      var vname = (c.vend||'').replace(/^\d+\s*-?\s*/,'').trim();
+      (c.mats||[]).forEach(function(m){
+        if (m.tipo === 'otro') return;
+        if (tipoFiltro && m.tipo !== tipoFiltro) return;
+        if (m.v26 > 0) return; // sí compró
+        out.push({desc:m.desc, tipo:m.tipo, cod:c.cod, nom:c.nom, loc:c.loc||'', vend:vname, vendRaw:c.vend||'', v25:m.v25||0});
+      });
+    });
+  }
+  return out.sort(function(a,b){
+    return (a.vend||'zzz').localeCompare(b.vend||'zzz','es') || (a.nom||'').localeCompare(b.nom||'','es');
+  });
+}
+
+function _matRenderNoCompradores(){
+  var el = document.getElementById('matdash-content');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">'
+      + '<select id="f-noc-tipo" onchange="filtrarMatNoComp()" '
+        + 'style="border:1px solid #d1d5db;border-radius:6px;padding:8px 10px;font-size:13px;min-width:200px">'
+        + '<option value="">Todos los tipos</option>'
+        + '<option value="bandeja">Bandejas</option>'
+        + '<option value="freezer">Freezers</option>'
+        + '<option value="exhibidora_saladix">Exhibidoras Saladix</option>'
+        + '<option value="ganchera_masti">Gancheras Masti</option>'
+        + '<option value="ganchera_mogul">Gancheras Mogul</option>'
+        + '<option value="plataforma">Plataforma</option>'
+      + '</select>'
+      + _matVendSelect('filtrarMatNoComp')
+      + '<button onclick="descargarNoCompradoresMatPDF()" style="background:#B91C1C;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">📄 PDF general</button>'
+    + '</div>'
+    + '<div id="noc-porvend" style="margin-bottom:14px"></div>'
+    + '<div style="background:#fff;border-radius:10px;border:1px solid #e5e7eb;overflow:hidden">'
+      + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr style="background:#B91C1C;color:#fff">'
+        + '<th style="padding:9px 8px;text-align:left">Material</th>'
+        + '<th style="padding:9px 8px;text-align:left">Cliente</th>'
+        + '<th style="padding:9px 8px;text-align:left">Localidad</th>'
+        + '<th style="padding:9px 8px;text-align:left">Vendedor</th>'
+        + '<th style="padding:9px 8px;text-align:right">Compró AA</th>'
+      + '</tr></thead>'
+      + '<tbody id="noc-tbody"></tbody>'
+      + '</table></div>'
+    + '</div>'
+    + '<div id="noc-count" style="font-size:11px;color:#9ca3af;margin-top:8px"></div>';
+  filtrarMatNoComp();
+}
+
+function filtrarMatNoComp(){
+  var tipo = (document.getElementById('f-noc-tipo')||{}).value || '';
+  var vendFiltro = (document.getElementById('f-mat-vend')||{}).value || '';
+  var rows = _matNoCompradores(tipo, vendFiltro);
+  window._nocRowsCache = rows;
+
+  // Resumen por vendedor con botón de enviar por WhatsApp
+  var porVend = {};
+  rows.forEach(function(r){
+    var key = r.vendRaw || '(sin vendedor)';
+    if (!porVend[key]) porVend[key] = {nombre: r.vend || 'Sin vendedor', items: []};
+    porVend[key].items.push(r);
+  });
+  var claves = Object.keys(porVend).sort(function(a,b){ return porVend[a].nombre.localeCompare(porVend[b].nombre,'es'); });
+  var resumenHtml = claves.map(function(key){
+    var v = porVend[key];
+    return '<div style="display:flex;align-items:center;justify-content:space-between;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px 12px;margin-bottom:6px">'
+      + '<div><b style="font-size:12.5px">'+escapeHtmlSeg(v.nombre)+'</b> <span style="color:#6b7280;font-size:11.5px">— '+v.items.length+' sin comprar</span></div>'
+      + '<button onclick="enviarNoCompradoresVendWA(\''+escAttrSeg(key)+'\')" style="background:#25D366;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11.5px;font-weight:700;cursor:pointer;white-space:nowrap">💬 Enviar</button>'
+      + '</div>';
+  }).join('') || '<div style="padding:14px;text-align:center;color:#9ca3af;font-size:12.5px;background:#fff;border:1px solid #e5e7eb;border-radius:8px">Sin no-compradores para este filtro 🎉</div>';
+  var wrapResumen = document.getElementById('noc-porvend');
+  if (wrapResumen) wrapResumen.innerHTML = resumenHtml;
+
+  // Tabla detalle
+  var html = rows.slice(0,300).map(function(r){
+    return '<tr style="border-bottom:1px solid #f0f4ff">'
+      + '<td style="padding:7px 8px;font-size:11px">'+escapeHtmlSeg(r.desc||'')+'</td>'
+      + '<td style="padding:7px 8px;font-size:11px;font-weight:500">'+escapeHtmlSeg(r.nom||'')+'</td>'
+      + '<td style="padding:7px 8px;font-size:10px;color:#6b7280">'+escapeHtmlSeg(r.loc||'')+'</td>'
+      + '<td style="padding:7px 8px;font-size:10px;color:#6b7280">'+escapeHtmlSeg(r.vend||'')+'</td>'
+      + '<td style="padding:7px 8px;text-align:right;color:#6b7280">'+(r.v25>0?_matFmt(r.v25):'--')+'</td>'
+      + '</tr>';
+  }).join('');
+  var tbody = document.getElementById('noc-tbody');
+  if (tbody) tbody.innerHTML = html || '<tr><td colspan="5" style="text-align:center;padding:30px;color:#999">Sin resultados</td></tr>';
+  var cnt = document.getElementById('noc-count');
+  if (cnt) cnt.textContent = rows.length + ' clientes sin comprar' + (tipo ? (' · '+(MAT_TIPO_LABEL[tipo]||tipo)) : '');
+}
+
+// Envía por WhatsApp la lista de no-compradores de UN vendedor puntual.
+function enviarNoCompradoresVendWA(vendKey){
+  var rows = (window._nocRowsCache||[]).filter(function(r){ return (r.vendRaw||'(sin vendedor)') === vendKey; });
+  if (!rows.length){ mostrarToast('No hay datos para ese vendedor.'); return; }
+  var nombreVend = rows[0].vend || 'Sin vendedor';
+  var porTipo = {};
+  rows.forEach(function(r){
+    var label = MAT_TIPO_LABEL[r.tipo] || r.tipo;
+    if (!porTipo[label]) porTipo[label] = [];
+    porTipo[label].push(r);
+  });
+  var texto = '*RIMSA — No compradores de materiales · '+nombreVend+'*\n';
+  texto += '_Corte: '+new Date().toLocaleDateString('es-AR')+'_\n\n';
+  Object.keys(porTipo).sort().forEach(function(label){
+    texto += '*'+label+'* ('+porTipo[label].length+')\n';
+    porTipo[label].forEach(function(r){
+      texto += '• '+r.nom+(r.loc?' — '+r.loc:'')+'\n';
+    });
+    texto += '\n';
+  });
+  texto += '_Total: '+rows.length+' sin comprar_';
+  if (navigator.share) {
+    navigator.share({title:'No compradores · '+nombreVend, text:texto}).catch(function(){});
+  } else {
+    window.open('https://wa.me/?text='+encodeURIComponent(texto), '_blank');
+  }
+}
+
+// PDF general con todos los no-compradores del filtro actual (todos los vendedores si no
+// se eligió uno puntual).
+async function descargarNoCompradoresMatPDF(){
+  try {
+    var jsPDFlib = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+    if (!jsPDFlib) { mostrarToast('⏳ jsPDF no disponible', 'error'); return; }
+    var tipo = (document.getElementById('f-noc-tipo')||{}).value || '';
+    var vendFiltro = (document.getElementById('f-mat-vend')||{}).value || '';
+    var rows = _matNoCompradores(tipo, vendFiltro);
+    if (!rows.length) { mostrarToast('No hay no-compradores para este filtro', 'error'); return; }
+
+    var doc = new jsPDFlib({unit:'mm', format:'a4', orientation:'landscape'});
+    var PW = 297, PH = 210, ML = 8, MR = 8, MT = 8;
+    var cols = [
+      {h:'Material',   w:65, key:'desc'},
+      {h:'Cliente',    w:65, key:'nom'},
+      {h:'Localidad',  w:35, key:'loc'},
+      {h:'Vendedor',   w:45, key:'vend'},
+      {h:'Compró AA',  w:25, key:'v25', right:true}
+    ];
+    var totalW = cols.reduce(function(s,c){return s+c.w;},0);
+
+    doc.setFillColor(185,28,28);
+    doc.rect(ML, MT, PW-ML-MR, 8, 'F');
+    doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(255,255,255);
+    doc.text('RIMSA — No Compradores de Materiales · '+new Date().toLocaleDateString('es-AR'), ML+3, MT+5.5);
+    doc.setFontSize(8);
+    doc.text(rows.length+' clientes', PW-MR-3, MT+5.5, {align:'right'});
+
+    var ROW_H = 6, y = MT+10;
+    function drawHeader(yy){
+      doc.setFillColor(220,60,60);
+      doc.rect(ML, yy, totalW, ROW_H, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(255,255,255);
+      var x = ML;
+      cols.forEach(function(c){
+        var tx = c.right ? x+c.w-1 : x+1;
+        doc.text(c.h, tx, yy+4, {align: c.right?'right':'left'});
+        x += c.w;
+      });
+    }
+    drawHeader(y); y += ROW_H;
+
+    rows.forEach(function(r, ri){
+      if (y + ROW_H > PH - MR) { doc.addPage(); y = MT; drawHeader(y); y += ROW_H; }
+      if (ri % 2 === 0) { doc.setFillColor(254,242,242); doc.rect(ML, y, totalW, ROW_H, 'F'); }
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(20,20,50);
+      var x = ML;
+      cols.forEach(function(c){
+        var txt = c.key==='v25' ? (r.v25>0?_matFmt(r.v25):'--') : String(r[c.key]||'');
+        if (!c.right && txt.length > Math.floor(c.w/1.8)) txt = txt.substring(0, Math.floor(c.w/1.8)) + '…';
+        var tx = c.right ? x+c.w-1 : x+1;
+        doc.text(txt, tx, y+4, {align: c.right?'right':'left'});
+        x += c.w;
+      });
+      doc.setDrawColor(240,220,220); doc.setLineWidth(0.1);
+      doc.line(ML, y+ROW_H, ML+totalW, y+ROW_H);
+      y += ROW_H;
+    });
+
+    var blob = doc.output('blob');
+    var file = new File([blob], 'no_compradores_materiales.pdf', {type:'application/pdf'});
+    if (navigator.share && navigator.canShare && navigator.canShare({files:[file]})) {
+      await navigator.share({files:[file], title:'No compradores de materiales RIMSA'});
+    } else {
+      doc.save('no_compradores_materiales.pdf');
+      mostrarToast('✅ PDF descargado — '+rows.length+' clientes', 'ok');
+    }
+  } catch(e) {
+    console.error(e);
+    mostrarToast('❌ Error al generar informe: '+e.message, 'error');
+  }
+}
+
+
+
 // ════════════════ MATERIALES: asignar / eliminar / traspasar (manual) ════════════════
 // Estos cambios se guardan aparte del Excel (Supabase id=8, mismo patrón que el estado
 // de comodato en id=7) y se reaplican por encima de lo que trae cada carga de Excel,
@@ -13646,7 +13857,7 @@ var MAT_DESCS_POR_TIPO = {
   ganchera_masti: ['GANCHERA MASTI'],
   ganchera_mogul: ['GANCHERA MOGUL']
 };
-var MAT_TIPO_LABEL = {bandeja:'Bandeja', freezer:'Freezer', exhibidora_saladix:'Exhibidora Saladix', ganchera_masti:'Ganchera Masti', ganchera_mogul:'Ganchera Mogul'};
+var MAT_TIPO_LABEL = {bandeja:'Bandeja', freezer:'Freezer', exhibidora_saladix:'Exhibidora Saladix', ganchera_masti:'Ganchera Masti', ganchera_mogul:'Ganchera Mogul', plataforma:'Plataforma'};
 
 if (!window._matOverrides) window._matOverrides = {asignados:[], eliminados:[]};
 
@@ -13918,6 +14129,7 @@ function buildMatDash() {
     + '<div style="display:flex;gap:6px;margin-bottom:14px;border-bottom:2px solid #e5e7eb">'
       + _matSubBtn('lista', '📋 Lista')
       + _matSubBtn('ranking', '🏆 Ranking')
+      + _matSubBtn('nocompradores', '🚫 No compradores')
       + _matSubBtn('graficos', '📊 Gráficos')
     + '</div>'
     + '<div id="matdash-content"></div>';
@@ -13954,9 +14166,10 @@ function _matSetSubTab(tab) {
 }
 
 function _matRenderSubTab() {
-  if (_matSubTab === 'lista')    _matRenderLista();
-  if (_matSubTab === 'ranking')  _matRenderRanking();
-  if (_matSubTab === 'graficos') _matRenderGraficos();
+  if (_matSubTab === 'lista')          _matRenderLista();
+  if (_matSubTab === 'ranking')        _matRenderRanking();
+  if (_matSubTab === 'nocompradores')  _matRenderNoCompradores();
+  if (_matSubTab === 'graficos')       _matRenderGraficos();
 }
 
 // ════════════════ LISTA ════════════════
