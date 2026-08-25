@@ -10745,7 +10745,23 @@ try{(async function(){
     if(d2.plataforma_detalle && d2.plataforma_detalle.length){
       window._PLATDET = d2.plataforma_detalle;
     }
+    if (typeof _matAplicarOverrides === 'function') _matAplicarOverrides();
+    if (document.getElementById('mod-matdash') && typeof buildMatDash === 'function') buildMatDash();
   }catch(e){ if(location.protocol!=='file:') console.warn('concesiones:',e.message); }
+})();}catch(e){}
+// Asignaciones/eliminaciones/traspasos manuales de materiales (id=8), independiente
+// del Excel — mismo patrón que comodato (id=7) y segmentación (id=4).
+try{(async function(){
+  try{
+    const res = await fetch(SUPA_URL+'/rest/v1/rimsa_data?id=eq.8&select=data',{headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}});
+    if(!res.ok) return;
+    const rows = await res.json();
+    if(rows && rows.length && rows[0].data){
+      window._matOverrides = Object.assign({asignados:[],eliminados:[]}, rows[0].data);
+    }
+    if (typeof _matAplicarOverrides === 'function') _matAplicarOverrides();
+    if (document.getElementById('mod-matdash') && typeof buildMatDash === 'function') buildMatDash();
+  }catch(e){ if(location.protocol!=='file:') console.warn('matOverrides:',e.message); }
 })();}catch(e){}
 try{supaCargarCatalogo().then(function(prods){
   try{
@@ -13546,6 +13562,9 @@ function _matProcesarWorkbook(wb) {
       window._CONMAP = {};
       CLI.forEach(function(c){ window._CONMAP[String(parseInt(c.cod))] = c; });
       window._PLATDET = PLAT;
+      // Reaplicar asignaciones/eliminaciones/traspasos manuales (persisten aparte del
+      // Excel, igual que el estado de comodato) por encima de lo recién importado.
+      if (typeof _matAplicarOverrides === 'function') _matAplicarOverrides();
 
       fetch(SUPA_URL+'/rest/v1/rimsa_data', {
         method:'POST',
@@ -13614,6 +13633,265 @@ function _matFmt(n) {
 function _matIni(nom) {
   var p = (nom||'').trim().split(/\s+/);
   return ((p[0]||'')[0]||'') + ((p[1]||'')[0]||'');
+}
+
+// ════════════════ MATERIALES: asignar / eliminar / traspasar (manual) ════════════════
+// Estos cambios se guardan aparte del Excel (Supabase id=8, mismo patrón que el estado
+// de comodato en id=7) y se reaplican por encima de lo que trae cada carga de Excel,
+// para que sobrevivan a la reconstrucción automática de _matProcesarWorkbook.
+var MAT_DESCS_POR_TIPO = {
+  bandeja: ['BANDEJA 2.0','Bandeja ESTANDAR a Medida (serie)','Bandeja Estandar  (serie)'],
+  freezer: ['FREEZER 3 CANASTOS ARCOR','FREEZER 4 CANASTOS ARCOR','FREEZER 5 CANASTOS ARCOR','FREEZER 6 CANASTOS ARCOR','FREZER VERTICAL ARCOR'],
+  exhibidora_saladix: ['EXHIBIDOR SALADIX AASS GRANDE','EXHIBIDOR SALADIX HORNEADOS','EXHIBIDORES SALADIX AASS'],
+  ganchera_masti: ['GANCHERA MASTI'],
+  ganchera_mogul: ['GANCHERA MOGUL']
+};
+var MAT_TIPO_LABEL = {bandeja:'Bandeja', freezer:'Freezer', exhibidora_saladix:'Exhibidora Saladix', ganchera_masti:'Ganchera Masti', ganchera_mogul:'Ganchera Mogul'};
+
+if (!window._matOverrides) window._matOverrides = {asignados:[], eliminados:[]};
+
+function jbinGuardarMatOverrides(){
+  fetch(SUPA_URL+'/rest/v1/rimsa_data', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'resolution=merge-duplicates'},
+    body: JSON.stringify({id:8, data: window._matOverrides})
+  }).catch(function(){});
+}
+
+// Reaplica las asignaciones/eliminaciones/traspasos manuales sobre window._CONCESIONES.
+// Idempotente: se puede llamar tantas veces como haga falta (tras cargar Excel, tras
+// cargar el override desde Supabase, tras cada acción manual) sin duplicar ni romper nada.
+function _matAplicarOverrides(){
+  var ov = window._matOverrides || {asignados:[], eliminados:[]};
+  var con = window._CONCESIONES || (window._CONCESIONES = []);
+  var byCod = {};
+  con.forEach(function(c){ byCod[c.cod]=c; });
+
+  (ov.eliminados||[]).forEach(function(e){
+    var c = byCod[e.cod];
+    if(!c) return;
+    c.mats = (c.mats||[]).filter(function(m){ return m.desc !== e.desc; });
+  });
+
+  (ov.asignados||[]).forEach(function(a){
+    var c = byCod[a.cod];
+    if(!c){
+      var info = (typeof _segClienteInfo==='function') ? _segClienteInfo(a.cod) : null;
+      c = {cod:a.cod, nom:a.nombre||(info&&info.nombre)||a.cod, loc:'', prov:'', dir:'',
+           vend:(info&&info.vend_name)||'', mats:[], v26_helado:0};
+      con.push(c);
+      byCod[a.cod]=c;
+    }
+    var yaEsta = (c.mats||[]).some(function(m){ return m.desc===a.desc; });
+    if(!yaEsta){
+      c.mats.push({desc:a.desc, tipo:a.tipo, qty:1, uso:'', v25:0, v26:0, gol25:0, gol26:0, choc25:0, choc26:0, var:null, manual:true});
+    }
+  });
+
+  window._CONCESIONES = con;
+  window._CONMAP = {};
+  con.forEach(function(c){ window._CONMAP[String(parseInt(c.cod))] = c; });
+}
+
+function _matGetOrCreateModal(id){
+  var modal = document.getElementById(id);
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = id;
+    modal.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(modal);
+  }
+  return modal;
+}
+function cerrarModalMat(id){
+  var modal = document.getElementById(id);
+  if(modal) modal.style.display = 'none';
+}
+
+// ── Asignar material ──
+function matAbrirAsignar(codPrefijado, nombrePrefijado){
+  var modal = _matGetOrCreateModal('mat-asignar-modal');
+  var tipoOpts = Object.keys(MAT_TIPO_LABEL).map(function(t){ return '<option value="'+t+'">'+MAT_TIPO_LABEL[t]+'</option>'; }).join('');
+  modal.innerHTML =
+    '<div style="background:#fff;border-radius:14px;width:100%;max-width:420px;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:\'DM Sans\',sans-serif;margin:auto">'
+    + '<div style="background:linear-gradient(135deg,#001F58,#003DA5);color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between">'
+    +   '<div style="font-family:\'Syne\',sans-serif;font-weight:800;font-size:14px">➕ Asignar material</div>'
+    +   '<button onclick="cerrarModalMat(\'mat-asignar-modal\')" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>'
+    + '</div>'
+    + '<div style="padding:16px 18px">'
+    +   '<div style="margin-bottom:10px;position:relative">'
+    +     '<label style="display:block;font-size:11.5px;font-weight:600;color:#374151;margin-bottom:3px">Cliente</label>'
+    +     '<input type="text" id="mat-asig-buscar" placeholder="Buscar cliente por nombre o código..." oninput="matBuscarClienteAsignar()" '
+    +       'value="'+(nombrePrefijado?escapeHtmlSeg(nombrePrefijado)+' (#'+escAttrSeg(codPrefijado)+')':'')+'" '
+    +       'style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:7px 9px;font-size:13px;box-sizing:border-box">'
+    +     '<input type="hidden" id="mat-asig-cod" value="'+escAttrSeg(codPrefijado||'')+'">'
+    +     '<input type="hidden" id="mat-asig-nombre" value="'+escAttrSeg(nombrePrefijado||'')+'">'
+    +     '<div id="mat-asig-resultados" style="display:none;position:absolute;left:0;right:0;top:100%;background:#fff;border:1px solid #d1d5db;border-radius:6px;max-height:180px;overflow-y:auto;z-index:10;box-shadow:0 8px 20px rgba(0,0,0,.12)"></div>'
+    +   '</div>'
+    +   '<div style="margin-bottom:10px">'
+    +     '<label style="display:block;font-size:11.5px;font-weight:600;color:#374151;margin-bottom:3px">Tipo de material</label>'
+    +     '<select id="mat-asig-tipo" onchange="matActualizarDescAsignar()" style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:7px 9px;font-size:13px;box-sizing:border-box">'+tipoOpts+'</select>'
+    +   '</div>'
+    +   '<div style="margin-bottom:4px">'
+    +     '<label style="display:block;font-size:11.5px;font-weight:600;color:#374151;margin-bottom:3px">Descripción</label>'
+    +     '<select id="mat-asig-desc" style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:7px 9px;font-size:13px;box-sizing:border-box"></select>'
+    +   '</div>'
+    + '</div>'
+    + '<div style="padding:12px 18px;border-top:1px solid #E5E7EB;display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button onclick="cerrarModalMat(\'mat-asignar-modal\')" style="background:#F3F4F6;color:#374151;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Cancelar</button>'
+    +   '<button onclick="matGuardarAsignacion()" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Asignar</button>'
+    + '</div></div>';
+  modal.style.display = 'flex';
+  matActualizarDescAsignar();
+}
+function matActualizarDescAsignar(){
+  var tipo = (document.getElementById('mat-asig-tipo')||{}).value || 'bandeja';
+  var sel = document.getElementById('mat-asig-desc');
+  if(!sel) return;
+  var descs = MAT_DESCS_POR_TIPO[tipo] || [];
+  sel.innerHTML = descs.map(function(d){ return '<option value="'+escAttrSeg(d)+'">'+escapeHtmlSeg(d)+'</option>'; }).join('');
+}
+function matBuscarClienteAsignar(){
+  var q = (document.getElementById('mat-asig-buscar')||{}).value || '';
+  var wrap = document.getElementById('mat-asig-resultados');
+  if(!wrap) return;
+  if(!q || q.length<2){ wrap.style.display='none'; wrap.innerHTML=''; return; }
+  var res = (typeof _segBuscarClientes==='function') ? _segBuscarClientes(q) : [];
+  if(!res.length){
+    wrap.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#6b7280">Sin resultados.</div>';
+    wrap.style.display='block';
+    return;
+  }
+  wrap.innerHTML = res.map(function(c){
+    return '<div onclick="matSeleccionarClienteAsignar(\''+escAttrSeg(c.cod)+'\',\''+escAttrSeg(c.nombre)+'\')" '
+      + 'style="padding:7px 10px;font-size:12.5px;border-bottom:1px solid #f3f4f6;cursor:pointer">'
+      + escapeHtmlSeg(c.nombre)+' <small style="color:#6b7280">#'+escapeHtmlSeg(c.cod)+'</small></div>';
+  }).join('');
+  wrap.style.display='block';
+}
+function matSeleccionarClienteAsignar(cod, nombre){
+  document.getElementById('mat-asig-cod').value = cod;
+  document.getElementById('mat-asig-nombre').value = nombre;
+  document.getElementById('mat-asig-buscar').value = nombre+' (#'+cod+')';
+  document.getElementById('mat-asig-resultados').style.display='none';
+}
+function matGuardarAsignacion(){
+  var cod = (document.getElementById('mat-asig-cod')||{}).value || '';
+  var nombre = (document.getElementById('mat-asig-nombre')||{}).value || '';
+  var tipo = (document.getElementById('mat-asig-tipo')||{}).value || '';
+  var desc = (document.getElementById('mat-asig-desc')||{}).value || '';
+  if(!cod){ mostrarToast('Elegí un cliente de la lista.'); return; }
+  if(!tipo || !desc){ mostrarToast('Completá tipo y descripción.'); return; }
+  if(!window._matOverrides) window._matOverrides = {asignados:[], eliminados:[]};
+  window._matOverrides.eliminados = (window._matOverrides.eliminados||[]).filter(function(e){ return !(e.cod===cod && e.desc===desc); });
+  var yaExiste = (window._matOverrides.asignados||[]).some(function(a){ return a.cod===cod && a.desc===desc; });
+  if(!yaExiste){
+    window._matOverrides.asignados.push({cod:cod, nombre:nombre, tipo:tipo, desc:desc, fecha:new Date().toISOString()});
+  }
+  jbinGuardarMatOverrides();
+  _matAplicarOverrides();
+  cerrarModalMat('mat-asignar-modal');
+  mostrarToast('✅ Material asignado');
+  if(typeof _cuCache!=='undefined') _cuCache=null;
+  buildMatDash();
+}
+
+// ── Eliminar material ──
+function matEliminarMaterial(cod, rawDesc){
+  if(!confirm('¿Eliminar "'+rawDesc+'" de este cliente?\n\nSi el Excel lo sigue trayendo, no va a reaparecer solo: hay que reasignarlo manualmente.')) return;
+  if(!window._matOverrides) window._matOverrides = {asignados:[], eliminados:[]};
+  window._matOverrides.asignados = (window._matOverrides.asignados||[]).filter(function(a){ return !(a.cod===cod && a.desc===rawDesc); });
+  var yaEsta = (window._matOverrides.eliminados||[]).some(function(e){ return e.cod===cod && e.desc===rawDesc; });
+  if(!yaEsta) window._matOverrides.eliminados.push({cod:cod, desc:rawDesc, fecha:new Date().toISOString()});
+  jbinGuardarMatOverrides();
+  _matAplicarOverrides();
+  mostrarToast('🗑️ Material eliminado');
+  if(typeof _cuCache!=='undefined') _cuCache=null;
+  filtrarMat();
+}
+
+// ── Traspasar material a otro cliente ──
+function matAbrirTraspaso(cod, rawDesc, tipo){
+  var c = window._CONMAP && window._CONMAP[String(parseInt(cod))];
+  var modal = _matGetOrCreateModal('mat-traspaso-modal');
+  modal.innerHTML =
+    '<div style="background:#fff;border-radius:14px;width:100%;max-width:420px;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:\'DM Sans\',sans-serif;margin:auto">'
+    + '<div style="background:linear-gradient(135deg,#001F58,#003DA5);color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between">'
+    +   '<div style="font-family:\'Syne\',sans-serif;font-weight:800;font-size:14px">↔️ Traspasar material</div>'
+    +   '<button onclick="cerrarModalMat(\'mat-traspaso-modal\')" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>'
+    + '</div>'
+    + '<div style="padding:16px 18px">'
+    +   '<div style="background:#F3F4F6;border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12.5px">'
+    +     '<b>'+escapeHtmlSeg(rawDesc)+'</b><br><span style="color:#6b7280">Cliente actual: '+escapeHtmlSeg((c&&c.nom)||cod)+'</span>'
+    +   '</div>'
+    +   '<input type="hidden" id="mat-trasp-origen-cod" value="'+escAttrSeg(cod)+'">'
+    +   '<input type="hidden" id="mat-trasp-desc" value="'+escAttrSeg(rawDesc)+'">'
+    +   '<input type="hidden" id="mat-trasp-tipo" value="'+escAttrSeg(tipo)+'">'
+    +   '<input type="hidden" id="mat-trasp-destino-cod" value="">'
+    +   '<input type="hidden" id="mat-trasp-destino-nombre" value="">'
+    +   '<div style="position:relative">'
+    +     '<label style="display:block;font-size:11.5px;font-weight:600;color:#374151;margin-bottom:3px">Cliente destino</label>'
+    +     '<input type="text" id="mat-trasp-buscar" placeholder="Buscar cliente por nombre o código..." oninput="matBuscarClienteTraspaso()" '
+    +       'style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:7px 9px;font-size:13px;box-sizing:border-box">'
+    +     '<div id="mat-trasp-resultados" style="display:none;position:absolute;left:0;right:0;top:100%;background:#fff;border:1px solid #d1d5db;border-radius:6px;max-height:180px;overflow-y:auto;z-index:10;box-shadow:0 8px 20px rgba(0,0,0,.12)"></div>'
+    +   '</div>'
+    + '</div>'
+    + '<div style="padding:12px 18px;border-top:1px solid #E5E7EB;display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button onclick="cerrarModalMat(\'mat-traspaso-modal\')" style="background:#F3F4F6;color:#374151;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Cancelar</button>'
+    +   '<button onclick="matConfirmarTraspaso()" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Confirmar traspaso</button>'
+    + '</div></div>';
+  modal.style.display = 'flex';
+}
+function matBuscarClienteTraspaso(){
+  var q = (document.getElementById('mat-trasp-buscar')||{}).value || '';
+  var wrap = document.getElementById('mat-trasp-resultados');
+  if(!wrap) return;
+  if(!q || q.length<2){ wrap.style.display='none'; wrap.innerHTML=''; return; }
+  var res = (typeof _segBuscarClientes==='function') ? _segBuscarClientes(q) : [];
+  var origenCod = (document.getElementById('mat-trasp-origen-cod')||{}).value || '';
+  res = res.filter(function(c){ return c.cod !== origenCod; });
+  if(!res.length){
+    wrap.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#6b7280">Sin resultados.</div>';
+    wrap.style.display='block';
+    return;
+  }
+  wrap.innerHTML = res.map(function(c){
+    return '<div onclick="matSeleccionarDestino(\''+escAttrSeg(c.cod)+'\',\''+escAttrSeg(c.nombre)+'\')" '
+      + 'style="padding:7px 10px;font-size:12.5px;border-bottom:1px solid #f3f4f6;cursor:pointer">'
+      + escapeHtmlSeg(c.nombre)+' <small style="color:#6b7280">#'+escapeHtmlSeg(c.cod)+'</small></div>';
+  }).join('');
+  wrap.style.display='block';
+}
+function matSeleccionarDestino(cod, nombre){
+  document.getElementById('mat-trasp-destino-cod').value = cod;
+  document.getElementById('mat-trasp-destino-nombre').value = nombre;
+  document.getElementById('mat-trasp-buscar').value = nombre+' (#'+cod+')';
+  document.getElementById('mat-trasp-resultados').style.display='none';
+}
+function matConfirmarTraspaso(){
+  var origenCod = (document.getElementById('mat-trasp-origen-cod')||{}).value || '';
+  var rawDesc = (document.getElementById('mat-trasp-desc')||{}).value || '';
+  var tipo = (document.getElementById('mat-trasp-tipo')||{}).value || '';
+  var destCod = (document.getElementById('mat-trasp-destino-cod')||{}).value || '';
+  var destNombre = (document.getElementById('mat-trasp-destino-nombre')||{}).value || '';
+  if(!destCod){ mostrarToast('Elegí un cliente destino de la lista.'); return; }
+  if(destCod === origenCod){ mostrarToast('El destino tiene que ser distinto del cliente actual.'); return; }
+  if(!confirm('¿Traspasar "'+rawDesc+'" a '+destNombre+'?')) return;
+  if(!window._matOverrides) window._matOverrides = {asignados:[], eliminados:[]};
+  // Origen: sacar cualquier asignación manual ahí y marcarlo como eliminado
+  window._matOverrides.asignados = (window._matOverrides.asignados||[]).filter(function(a){ return !(a.cod===origenCod && a.desc===rawDesc); });
+  var yaElimOrigen = (window._matOverrides.eliminados||[]).some(function(e){ return e.cod===origenCod && e.desc===rawDesc; });
+  if(!yaElimOrigen) window._matOverrides.eliminados.push({cod:origenCod, desc:rawDesc, fecha:new Date().toISOString()});
+  // Destino: sacar cualquier eliminación manual previa y asignarlo
+  window._matOverrides.eliminados = (window._matOverrides.eliminados||[]).filter(function(e){ return !(e.cod===destCod && e.desc===rawDesc); });
+  var yaAsigDest = (window._matOverrides.asignados||[]).some(function(a){ return a.cod===destCod && a.desc===rawDesc; });
+  if(!yaAsigDest) window._matOverrides.asignados.push({cod:destCod, nombre:destNombre, tipo:tipo, desc:rawDesc, fecha:new Date().toISOString()});
+  jbinGuardarMatOverrides();
+  _matAplicarOverrides();
+  cerrarModalMat('mat-traspaso-modal');
+  mostrarToast('↔️ Material traspasado a '+destNombre);
+  if(typeof _cuCache!=='undefined') _cuCache=null;
+  filtrarMat();
 }
 
 function buildMatDash() {
@@ -13699,6 +13977,7 @@ function _matRenderLista() {
         + '<option value="plataforma">Plataforma</option>'
       + '</select>'
       + _matVendSelect()
+      + '<button onclick="matAbrirAsignar()" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap">➕ Asignar material</button>'
     + '</div>'
     + '<div style="background:#fff;border-radius:10px;border:1px solid #e5e7eb;overflow:hidden">'
       + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
@@ -13711,6 +13990,7 @@ function _matRenderLista() {
         + '<th style="padding:9px 8px;text-align:right">Mes AA</th>'
         + '<th style="padding:9px 8px;text-align:right">Var%</th>'
         + '<th style="padding:9px 8px;text-align:center">Comodato</th>'
+        + '<th style="padding:9px 8px;text-align:center">Acciones</th>'
       + '</tr></thead>'
       + '<tbody id="mat-tbody"></tbody>'
       + '</table></div>'
@@ -13748,7 +14028,7 @@ function filtrarMat() {
         var desc = (m.desc||'').toLowerCase();
         if (q && nom.indexOf(q) < 0 && desc.indexOf(q) < 0) return;
         var vname = (c.vend||'').replace(/^\d+\s*-?\s*/,'').trim();
-        rows.push({desc: m.desc + (m.qty>1?' (×'+m.qty+')':''), rawDesc: m.desc, cod: c.cod, dir: c.dir||'', nom: c.nom, loc: c.loc||'', vend: vname, v26:m.v26, v25:m.v25, varp:m.var, qty:m.qty||1});
+        rows.push({desc: m.desc + (m.qty>1?' (×'+m.qty+')':''), rawDesc: m.desc, tipo: m.tipo, cod: c.cod, dir: c.dir||'', nom: c.nom, loc: c.loc||'', vend: vname, v26:m.v26, v25:m.v25, varp:m.var, qty:m.qty||1});
       });
     });
   }
@@ -13765,10 +14045,11 @@ function filtrarMat() {
       + '<td style="padding:7px 8px;text-align:right;color:#6b7280">'+_matFmt(r.v25)+'</td>'
       + '<td style="padding:7px 8px;text-align:right">'+_matFmtV(r.varp,r.v25,r.v26)+'</td>'
       + '<td style="padding:7px 8px;text-align:center;white-space:nowrap">'+_matComodatoCellHtml(r)+'</td>'
+      + '<td style="padding:7px 8px;text-align:center;white-space:nowrap">'+_matAccionesCellHtml(r)+'</td>'
       + '</tr>';
   }).join('');
   var tbody = document.getElementById('mat-tbody');
-  if (tbody) tbody.innerHTML = html || '<tr><td colspan="8" style="text-align:center;padding:30px;color:#999">Sin resultados</td></tr>';
+  if (tbody) tbody.innerHTML = html || '<tr><td colspan="9" style="text-align:center;padding:30px;color:#999">Sin resultados</td></tr>';
   var cnt = document.getElementById('mat-count');
   if (cnt) cnt.textContent = 'Mostrando ' + rows.length + ' de ' + total + ' materiales';
 }
@@ -13778,6 +14059,11 @@ function filtrarMat() {
 // ════════════════ COMODATOS ════════════════
 // Estado (firmado sí/no + numeración) persiste en Supabase (id=7), igual patrón
 // que segmentación (id=4), overrides de vendedor (id=5) y datos de pago (id=6).
+function _matAccionesCellHtml(r){
+  if(!r.cod || !r.rawDesc) return '<span style="color:#9CA3AF;font-size:10px">—</span>';
+  return '<button onclick="matAbrirTraspaso(\''+escAttrSeg(r.cod)+'\',\''+escAttrSeg(r.rawDesc)+'\',\''+escAttrSeg(r.tipo||'')+'\')" title="Traspasar a otro cliente" style="background:#1A3A6B;color:#fff;border:none;border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer;margin-right:4px">↔️</button>'
+    + '<button onclick="matEliminarMaterial(\''+escAttrSeg(r.cod)+'\',\''+escAttrSeg(r.rawDesc)+'\')" title="Eliminar" style="background:#B91C1C;color:#fff;border:none;border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer">🗑️</button>';
+}
 function _matComodatoCellHtml(r){
   if(!r.cod || !r.rawDesc) return '<span style="color:#9CA3AF;font-size:10px">—</span>';
   var key = r.cod+'·'+r.rawDesc;
