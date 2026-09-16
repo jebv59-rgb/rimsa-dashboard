@@ -1166,8 +1166,21 @@ function xlsHandleFile(file){
             if(/^total general$/i.test(hscov)) continue;
             var mcodcov = hscov.match(/\((\d+)\)\s*$/);
             if(!mcodcov) continue;
-            colProdCov.push({col:cci, codigo:parseInt(mcodcov[1],10)});
+            colProdCov.push({col:cci, codigo:parseInt(mcodcov[1],10), nombre:hscov.replace(/\s*\(\d+\)\s*$/,'').trim()});
           }
+          // Clientes de plataforma (AASS Select / Club Arcor / Super Almacén), ya resueltos
+          // por _matProcesarWorkbook (corre antes que este bloque) en window._PLATDET.
+          // Sirven para armar el "mix de referencia": qué artículos y en qué volumen
+          // compra el conjunto de clientes de plataforma, para poder comparar a cada uno
+          // contra ese surtido y ver qué le falta.
+          var plataCodSetCov = {};
+          (window._PLATDET||[]).forEach(function(p){
+            if(!p.cod) return;
+            plataCodSetCov[String(p.cod).padStart(10,'0')] = {nombre:p.nombre||'', vend:p.vend||''};
+          });
+          var plataGlobalTotalsCov = {}; // codigo articulo -> qty total entre clientes plataforma
+          var plataAccCov = {};          // cod10 -> {nombre, vend, itemsByCod:{codigo:qty}}
+
           var newProdCompras={};
           var nCliCov=0;
           for(var rci=hdrRowCov+1; rci<cov.length; rci++){
@@ -1180,6 +1193,7 @@ function xlsHandleFile(file){
             if(!mccov) continue; // fila no reconocida
             var clicodcov = mccov[1].padStart(10,'0');
             nCliCov++;
+            var esPlataCov = plataCodSetCov[clicodcov];
             var setcov=null;
             for(var pci=0; pci<colProdCov.length; pci++){
               var cpcov = colProdCov[pci];
@@ -1188,6 +1202,11 @@ function xlsHandleFile(file){
               if(qtycov>0){
                 if(!setcov) setcov = [];
                 setcov.push(cpcov.codigo);
+                if(esPlataCov){
+                  plataGlobalTotalsCov[cpcov.codigo] = (plataGlobalTotalsCov[cpcov.codigo]||0) + qtycov;
+                  if(!plataAccCov[clicodcov]) plataAccCov[clicodcov] = {nombre:esPlataCov.nombre, vend:esPlataCov.vend, itemsByCod:{}};
+                  plataAccCov[clicodcov].itemsByCod[cpcov.codigo] = (plataAccCov[clicodcov].itemsByCod[cpcov.codigo]||0) + qtycov;
+                }
               }
             }
             if(setcov) newProdCompras[clicodcov]=setcov;
@@ -1195,6 +1214,29 @@ function xlsHandleFile(file){
           newD.prodCompras = newProdCompras;
           newD.prodCoberturaPeriodo = periodoCov;
           log('✅ coberturas: '+Object.keys(newProdCompras).length+' clientes con compras registradas ('+(periodoCov||'sin período')+')',74);
+
+          // Mix de plataforma: ranking global (referencia de "qué debería tener") +
+          // detalle por cliente (para ver qué le falta y qué es lo que más le vende).
+          var nombresPorCodCov = {};
+          colProdCov.forEach(function(cp){ nombresPorCodCov[cp.codigo]=cp.nombre; });
+          var plataMixRef = Object.keys(plataGlobalTotalsCov).map(function(cod){
+            return {codigo:parseInt(cod,10), nombre:nombresPorCodCov[cod]||('#'+cod), qty:plataGlobalTotalsCov[cod]};
+          }).sort(function(a,b){ return b.qty-a.qty; });
+          var plataMixPorCliente = {};
+          Object.keys(plataAccCov).forEach(function(cod10){
+            var accCli = plataAccCov[cod10];
+            var itemsCli = Object.keys(accCli.itemsByCod).map(function(cArt){
+              return {codigo:parseInt(cArt,10), nombre:nombresPorCodCov[cArt]||('#'+cArt), qty:accCli.itemsByCod[cArt]};
+            }).sort(function(a,b){ return b.qty-a.qty; });
+            plataMixPorCliente[cod10] = {
+              nombre: accCli.nombre, vend: accCli.vend,
+              qtyTotal: itemsCli.reduce(function(s,it){ return s+it.qty; },0),
+              items: itemsCli
+            };
+          });
+          newD.plataMixRef = plataMixRef;
+          newD.plataMixPorCliente = plataMixPorCliente;
+          log('✅ mix plataforma: '+plataMixRef.length+' artículos de referencia, '+Object.keys(plataMixPorCliente).length+' clientes con detalle',75);
         } else {
           log('⚠️ coberturas: no se encontró la fila de encabezados ("Etiquetas de fila")',74);
         }
@@ -15050,6 +15092,25 @@ function buildClientesUnif() {
   _cuRenderPagina();
 }
 
+// Mix de productos de plataforma: compara lo que compró un cliente contra el
+// surtido de referencia (los artículos más vendidos entre TODOS los clientes de
+// plataforma, según D.plataMixRef, recortado a un tope — por defecto 250).
+function _cuMixPlataforma(cod, topN){
+  var ref = (typeof D!=='undefined' && D.plataMixRef) || [];
+  if (!ref.length) return null;
+  topN = topN || 250;
+  var cod10 = String(cod).padStart(10,'0');
+  var det = (D.plataMixPorCliente||{})[cod10];
+  var N = Math.min(topN, ref.length);
+  var refTop = ref.slice(0, N);
+  var compradosMap = {};
+  (det&&det.items||[]).forEach(function(it){ compradosMap[it.codigo]=it.qty; });
+  var faltantes = refTop.filter(function(r){ return !compradosMap[r.codigo]; });
+  var mixCount = N - faltantes.length;
+  var topCliente = (det&&det.items||[]).slice(0,10);
+  return {mixCount:mixCount, refN:N, refTop:refTop, faltantes:faltantes, topCliente:topCliente, compradosMap:compradosMap, nombre: det&&det.nombre};
+}
+
 function _cuRenderPagina() {
   var cfg    = D.config || {};
   var total  = _cuFiltrados.length;
@@ -15112,7 +15173,11 @@ function _cuRenderPagina() {
       var bndColor = bndOk===true?'#166534':bndOk===false?'#991b1b':'#166534';
       badges += '<span class="st" style="background:'+bndBg+';color:'+bndColor+';display:block">🪧 '+(c.bnd.tipo_bandeja||c.bnd.desc||'Bandeja')+(c.bnd.objetivo!=null?' ('+c.bnd.objetivo+'kg)':'')+bndIcono+'</span>';
     }
-    if (c.plat) badges += '<span class="st" style="background:#fef9c3;color:#854d0e;display:block">🏷️ '+(c.plat.material||c.plat.tipo||'Plataforma')+'</span>';
+    if (c.plat) {
+      var mixBadgeInfo = _cuMixPlataforma(c.cod);
+      var mixBadgeTxt = mixBadgeInfo ? ' · Mix '+mixBadgeInfo.mixCount+'/'+mixBadgeInfo.refN : '';
+      badges += '<span class="st" style="background:#fef9c3;color:#854d0e;display:block">🏷️ '+(c.plat.material||c.plat.tipo||'Plataforma')+mixBadgeTxt+'</span>';
+    }
     if (c.exhib) badges += '<span class="st" style="background:#ede9fe;color:#5b21b6;display:block">🗄️ Exhib. Saladix</span>';
     if (c.ganch_m) badges += '<span class="st" style="background:#fff7ed;color:#9a3412;display:block">🪝 Ganchera Masti</span>';
     if (c.ganch_mo) badges += '<span class="st" style="background:#fff7ed;color:#9a3412;display:block">🪝 Ganchera Mogul</span>';
@@ -15183,6 +15248,20 @@ function _cuRenderPagina() {
         +(c.ganch_m?'<span>Masti: <b>'+(c.ganch_m.v26!=null?'$'+fmtM2(c.ganch_m.v26):'sí')+'</b></span>':'')
         +(c.ganch_mo?'<span>Mogul: <b>'+(c.ganch_mo.v26!=null?'$'+fmtM2(c.ganch_mo.v26):'sí')+'</b></span>':'')
       +'</div>':'')
+      // Mix de productos — solo clientes de plataforma, cruzando contra D.plataMixRef
+      +(function(){
+        if (!c.plat) return '';
+        var mix = _cuMixPlataforma(c.cod);
+        if (!mix) return '';
+        var mixCl = mix.mixCount>=mix.refN*0.8 ? 'good' : (mix.mixCount>=mix.refN*0.5 ? 'muted' : 'bad');
+        var topTxt = mix.topCliente.slice(0,5).map(function(it){ return it.nombre+' ('+Math.round(it.qty)+')'; }).join(' · ') || 'sin compras de mix registradas';
+        return '<div class="xv-section"><span class="xv-label">🧺 Mix de productos (plataforma)</span>'
+          +'<span>Cobertura: <b class="'+mixCl+'">'+mix.mixCount+' / '+mix.refN+'</b></span>'
+          +'<span class="muted">Le faltan: <b>'+mix.faltantes.length+'</b></span>'
+          +'<span class="muted" style="flex-basis:100%;font-size:9.5px">Top: '+topTxt+'</span>'
+          +'<button onclick="event.stopPropagation();abrirModalMixPlataforma(\''+c.cod+'\')" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:10.5px;font-weight:600;cursor:pointer">Ver detalle completo</button>'
+        +'</div>';
+      })()
       // Divisiones solo para clientes de plataforma
       +(divCards?'<div class="xv-divs"><div class="xv-divs-title">📦 KG por División vs mes anterior · proy. a '+cfg.dias_lab+' días</div>'
         +'<div class="xv-divs-grid">'+divCards+'</div></div>':'')
@@ -15222,6 +15301,80 @@ function _cuRenderPagina() {
     +'</table></div></div>';
 }
 
+// ── Modal: detalle completo de mix de plataforma (comprados / faltantes) ──
+function abrirModalMixPlataforma(cod){
+  var mix = _cuMixPlataforma(cod);
+  if (!mix) { mostrarToast('No hay datos de mix de plataforma para este cliente.'); return; }
+  var cliCache = (_cuCache||[]).find(function(c){ return c.cod===cod; });
+  var nombreCli = (cliCache&&cliCache.nombre) || mix.nombre || cod;
+
+  var compradosList = mix.refTop.filter(function(r){ return mix.compradosMap[r.codigo]>0; })
+    .map(function(r){ return {codigo:r.codigo, nombre:r.nombre, qty:mix.compradosMap[r.codigo]}; })
+    .sort(function(a,b){ return b.qty-a.qty; });
+  var faltantesList = mix.faltantes;
+
+  var modal = document.getElementById('mix-plataforma-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'mix-plataforma-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(modal);
+  }
+  var listHtml = function(items, withQty){
+    if (!items.length) return '<div style="padding:10px;color:#9ca3af;font-size:11.5px">— vacío —</div>';
+    return items.map(function(it){
+      return '<div style="padding:4px 8px;border-bottom:1px solid #f3f4f6;font-size:11px;display:flex;justify-content:space-between;gap:8px">'
+        + '<span>'+escapeHtmlSeg(it.nombre)+'</span>'
+        + (withQty?'<b style="white-space:nowrap">'+Math.round(it.qty)+'</b>':'')
+        + '</div>';
+    }).join('');
+  };
+
+  modal.innerHTML =
+    '<div style="background:#fff;border-radius:14px;width:100%;max-width:760px;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:\'DM Sans\',sans-serif;margin:auto">'
+    + '<div style="background:linear-gradient(135deg,#001F58,#003DA5);color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0">'
+    +   '<div><div style="font-family:\'Syne\',sans-serif;font-weight:800;font-size:14px">🧺 Mix de productos</div>'
+    +   '<div style="font-size:11px;opacity:.85">'+escapeHtmlSeg(nombreCli)+' · '+mix.mixCount+' / '+mix.refN+' ítems</div></div>'
+    +   '<button onclick="cerrarModalMat(\'mix-plataforma-modal\')" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>'
+    + '</div>'
+    + '<div style="padding:14px 18px;display:flex;gap:14px;flex-wrap:wrap">'
+    +   '<div style="flex:1;min-width:280px">'
+    +     '<div style="font-weight:700;font-size:12.5px;color:#166534;margin-bottom:6px">✅ Compra ('+compradosList.length+') — más vendidos primero</div>'
+    +     '<div style="border:1px solid #e5e7eb;border-radius:8px;max-height:360px;overflow-y:auto">'+listHtml(compradosList,true)+'</div>'
+    +   '</div>'
+    +   '<div style="flex:1;min-width:280px">'
+    +     '<div style="font-weight:700;font-size:12.5px;color:#991b1b;margin-bottom:6px">❌ Le falta ('+faltantesList.length+')</div>'
+    +     '<div style="border:1px solid #e5e7eb;border-radius:8px;max-height:360px;overflow-y:auto">'+listHtml(faltantesList,false)+'</div>'
+    +   '</div>'
+    + '</div>'
+    + '<div style="padding:12px 18px;border-top:1px solid #E5E7EB;display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button onclick="enviarMixPlataformaWA(\''+cod+'\')" style="background:#25D366;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer">💬 Enviar por WhatsApp</button>'
+    +   '<button onclick="cerrarModalMat(\'mix-plataforma-modal\')" style="background:#F3F4F6;color:#374151;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Cerrar</button>'
+    + '</div></div>';
+  modal.style.display = 'flex';
+}
+
+function enviarMixPlataformaWA(cod){
+  var mix = _cuMixPlataforma(cod);
+  if (!mix) { mostrarToast('No hay datos de mix de plataforma para este cliente.'); return; }
+  var cliCache = (_cuCache||[]).find(function(c){ return c.cod===cod; });
+  var nombreCli = (cliCache&&cliCache.nombre) || mix.nombre || cod;
+
+  var texto = '*RIMSA — Mix de productos · '+nombreCli+'*\n';
+  texto += '_Cobertura: '+mix.mixCount+' / '+mix.refN+' ítems_\n\n';
+  texto += '*Más vendidos:*\n';
+  mix.topCliente.slice(0,10).forEach(function(it){ texto += '• '+it.nombre+' ('+Math.round(it.qty)+')\n'; });
+  texto += '\n*Le faltan ('+mix.faltantes.length+'):*\n';
+  mix.faltantes.slice(0,30).forEach(function(it){ texto += '• '+it.nombre+'\n'; });
+  if (mix.faltantes.length>30) texto += '… y '+(mix.faltantes.length-30)+' más\n';
+  texto += '\n_RIMSA · '+new Date().toLocaleDateString('es-AR')+'_';
+
+  if (navigator.share) {
+    navigator.share({title:'Mix de productos · '+nombreCli, text:texto}).catch(function(){});
+  } else {
+    window.open('https://wa.me/?text='+encodeURIComponent(texto), '_blank');
+  }
+}
 
 </script>
 
