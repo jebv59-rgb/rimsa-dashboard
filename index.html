@@ -698,6 +698,7 @@ function xlsHandleFile(file){
         var curCod=null, curVend=null, curDiv=null, curSub=null;
         var kgTodos={}; // cod_10dig → {kg26,kg25}
         var segComprasSet={}; // cod_10dig → Set(sub-rubro codes comprados este período, y también sub-rubro·línea)
+        var clienteDivAcc={}; // cod_10dig → {GOLOSINAS:{kg25,kg26}, ALIMENTOS:{...}, CHOCOLATES:{...}, HARINAS:{...}, HELADOS:{...}}
 
         for(var ri=4;ri<kgaa.length;ri++){
           var row=kgaa[ri]; if(!row||!row[0]) continue;
@@ -767,6 +768,17 @@ function xlsHandleFile(file){
                   vAcc[curVend][divName].kg26+=kg26v;
                   vAcc[curVend][divName].kg25+=kg25v;
                 }
+                // Acumular también por cliente — para mostrar en la pestaña Clientes
+                // cuánto compró cada uno en Golosinas/Alimentos/Chocolates/Harinas/Helados,
+                // no solo el total global/por vendedor.
+                if(curCod){
+                  if(!clienteDivAcc[curCod]){
+                    clienteDivAcc[curCod]={};
+                    DIVS.forEach(function(d){clienteDivAcc[curCod][d]={kg25:0,kg26:0};});
+                  }
+                  clienteDivAcc[curCod][divName].kg26+=kg26v;
+                  clienteDivAcc[curCod][divName].kg25+=kg25v;
+                }
               }
             }
             continue;
@@ -795,6 +807,14 @@ function xlsHandleFile(file){
           var va=vAcc[vid]||vAcc[v.cod];
           if(va) v.divisiones=buildDivs(va);
         });
+
+        // Divisiones por cliente (Golosinas/Alimentos/Chocolates/Harinas/Helados) —
+        // se muestran en la pestaña Clientes para todos, no solo plataforma.
+        var newClienteDivisiones={};
+        Object.keys(clienteDivAcc).forEach(function(cod10){
+          newClienteDivisiones[cod10]=buildDivs(clienteDivAcc[cod10]);
+        });
+        newD.clienteDivisiones=newClienteDivisiones;
 
         // ── HOJA: rutas → reconstruir universo de Tarea (agrega clientes nuevos) ──
         // D.tasks nunca se reconstruía desde acá: solo se actualizaban los números
@@ -15030,6 +15050,7 @@ function _cuBuildCache() {
           ganch_m: matsByTipo.ganchera_masti || null,
           ganch_mo: matsByTipo.ganchera_mogul || null,
           con_loc: con ? con.loc : '',
+          divisiones: (D.clienteDivisiones||{})[String(c.cod).padStart(10,'0')] || null,
         };
       });
     });
@@ -15131,15 +15152,16 @@ function _cuRenderPagina() {
     var vP    = c.kg25>0 ? ((proy-c.kg25)/c.kg25*100) : null;
     var pCl   = vP==null?'muted':vP>=0?'good':'bad';
 
-    // ── Divisiones: solo si es de plataforma (único dato por cliente disponible)
+    // ── Divisiones: Golosinas / Alimentos / Chocolates / Harinas / Helados —
+    // ahora para TODOS los clientes (antes solo aparecía en los de plataforma).
     var divCards = '';
-    if (c.plat && c.plat.divisiones && c.plat.divisiones.length) {
-      divCards = c.plat.divisiones.map(function(d){
-        var dproy = +(d.abr26 * factor).toFixed(1);
-        var dvarp = d.abr25>0 ? +((dproy-d.abr25)/d.abr25*100).toFixed(1) : null;
+    if (c.divisiones && c.divisiones.length) {
+      divCards = c.divisiones.map(function(d){
+        var dproy = +(d.kg26 * factor).toFixed(1);
+        var dvarp = d.kg25>0 ? +((dproy-d.kg25)/d.kg25*100).toFixed(1) : null;
         var dvarCl = d.var_pct==null?'muted':d.var_pct>=0?'good':'bad';
         var dpCl   = dvarp==null?'muted':dvarp>=0?'good':'bad';
-        var dbw    = d.abr25>0 ? Math.min(100,(d.abr26/d.abr25)*100) : (d.abr26>0?100:0);
+        var dbw    = d.kg25>0 ? Math.min(100,(d.kg26/d.kg25)*100) : (d.kg26>0?100:0);
         var dbcl   = d.var_pct==null?'pbar-warn':d.var_pct>=-5?'pbar-good':d.var_pct>=-25?'pbar-warn':'pbar-bad';
         var gapTxt = d.gap_kg>0
           ? '<span class="bad" style="font-size:9px">faltan '+d.gap_kg.toFixed(0)+' KG</span>'
@@ -15148,9 +15170,9 @@ function _cuRenderPagina() {
           +'<div class="xv-div-name">'+d.div+'</div>'
           +'<div class="xv-div-row">'
             +'<div style="text-align:center"><div class="muted" style="font-size:8px">MES AA</div>'
-              +'<b style="font-size:10px">'+d.abr25.toFixed(1)+'</b><div class="muted" style="font-size:8px">KG</div></div>'
+              +'<b style="font-size:10px">'+d.kg25.toFixed(1)+'</b><div class="muted" style="font-size:8px">KG</div></div>'
             +'<div style="text-align:center"><div class="muted" style="font-size:8px">ACTUAL</div>'
-              +'<b style="font-size:11px;color:var(--arc-blue)">'+d.abr26.toFixed(1)+'</b>'
+              +'<b style="font-size:11px;color:var(--arc-blue)">'+d.kg26.toFixed(1)+'</b>'
               +'<div style="font-size:9px"><span class="'+dvarCl+'">'+(d.var_pct!=null?(d.var_pct>=0?'▲':'▼')+Math.abs(d.var_pct).toFixed(0)+'%':'—')+'</span></div></div>'
             +'<div style="text-align:center"><div class="muted" style="font-size:8px">PROY.'+cfg.dias_lab+'d</div>'
               +'<b style="font-size:11px;color:'+(dpCl==='good'?'var(--pos)':dpCl==='bad'?'var(--neg)':'var(--warn)')+'">'+dproy.toFixed(1)+'</b>'
@@ -15262,7 +15284,7 @@ function _cuRenderPagina() {
           +'<button onclick="event.stopPropagation();abrirModalMixPlataforma(\''+c.cod+'\')" style="background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:10.5px;font-weight:600;cursor:pointer">Ver detalle completo</button>'
         +'</div>';
       })()
-      // Divisiones solo para clientes de plataforma
+      // Divisiones (Golosinas/Alimentos/Chocolates/Harinas/Helados) para todos los clientes
       +(divCards?'<div class="xv-divs"><div class="xv-divs-title">📦 KG por División vs mes anterior · proy. a '+cfg.dias_lab+' días</div>'
         +'<div class="xv-divs-grid">'+divCards+'</div></div>':'')
     +'</div></td></tr>';
