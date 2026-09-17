@@ -810,11 +810,14 @@ function xlsHandleFile(file){
 
         // Divisiones por cliente (Golosinas/Alimentos/Chocolates/Harinas/Helados) —
         // se muestran en la pestaña Clientes para todos, no solo plataforma.
+        // NOTA: se guarda en window._CLIENTE_DIVISIONES (no en newD/D) y se sincroniza
+        // aparte (Supabase id=9) para no inflar rim_D — con ~1000+ clientes esto sumado
+        // a plataMix pasaba el cupo de localStorage y el navegador dejaba de guardar D.
         var newClienteDivisiones={};
         Object.keys(clienteDivAcc).forEach(function(cod10){
           newClienteDivisiones[cod10]=buildDivs(clienteDivAcc[cod10]);
         });
-        newD.clienteDivisiones=newClienteDivisiones;
+        window._CLIENTE_DIVISIONES=newClienteDivisiones;
 
         // ── HOJA: rutas → reconstruir universo de Tarea (agrega clientes nuevos) ──
         // D.tasks nunca se reconstruía desde acá: solo se actualizaban los números
@@ -1254,8 +1257,9 @@ function xlsHandleFile(file){
               items: itemsCli
             };
           });
-          newD.plataMixRef = plataMixRef;
-          newD.plataMixPorCliente = plataMixPorCliente;
+          // Igual que clienteDivisiones: aparte de D (window._PLATA_MIX), sincronizado
+          // solo, para no inflar rim_D y volver a pasar el cupo de localStorage.
+          window._PLATA_MIX = {ref: plataMixRef, porCliente: plataMixPorCliente};
           log('✅ mix plataforma: '+plataMixRef.length+' artículos de referencia, '+Object.keys(plataMixPorCliente).length+' clientes con detalle',75);
         } else {
           log('⚠️ coberturas: no se encontró la fila de encabezados ("Etiquetas de fila")',74);
@@ -1597,6 +1601,10 @@ function xlsHandleFile(file){
       // ── Aplicar ──────────────────────────────────────────────────────
       window.D=newD;
       try{D=newD;}catch(ex){}
+      // Invalidar caches derivados de D (si no, pestañas como Clientes siguen
+      // mostrando la lista vieja aunque D ya se haya actualizado, porque
+      // _cuBuildCache() solo se vuelve a correr si _cuCache es null/undefined).
+      try{ if (typeof _cuCache !== 'undefined') _cuCache = null; }catch(ex){}
       try{
         localStorage.setItem('rim_D', JSON.stringify(newD));
         localStorage.setItem('rim_D_fecha', newD.config&&newD.config.corte?newD.config.corte:'');
@@ -1634,6 +1642,20 @@ function xlsHandleFile(file){
       jbinGuardar(newD).then(function(ok){
         xlsOK(ok?'✅ Datos sincronizados en Supabase':'✅ Guardado localmente (sin conexión)',true);
       });
+      // Mix de plataforma y divisiones por cliente van aparte (id=9): no forman parte
+      // de newD/rim_D a propósito (ver comentario donde se calculan), así que se
+      // sincronizan con su propio POST.
+      if (window._CLIENTE_DIVISIONES || window._PLATA_MIX) {
+        fetch(SUPA_URL+'/rest/v1/rimsa_data', {
+          method:'POST',
+          headers:{'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'resolution=merge-duplicates'},
+          body: JSON.stringify({id:9, data:{
+            clienteDivisiones: window._CLIENTE_DIVISIONES||{},
+            plataMixRef: (window._PLATA_MIX&&window._PLATA_MIX.ref)||[],
+            plataMixPorCliente: (window._PLATA_MIX&&window._PLATA_MIX.porCliente)||{}
+          }})
+        }).catch(function(){});
+      }
 
     }catch(err){
       console.error(err);
@@ -10825,6 +10847,23 @@ try{(async function(){
     if (document.getElementById('mod-matdash') && typeof buildMatDash === 'function') buildMatDash();
   }catch(e){ if(location.protocol!=='file:') console.warn('matOverrides:',e.message); }
 })();}catch(e){}
+// Mix de plataforma y divisiones por cliente (id=9) — se calculan en cada carga de
+// Excel pero se guardan aparte de D (ver comentario en el pipeline) para no pasar el
+// cupo de localStorage. Se restauran acá para que la pestaña Clientes los tenga
+// disponibles sin necesidad de volver a subir el Excel en esta sesión del navegador.
+try{(async function(){
+  try{
+    const res = await fetch(SUPA_URL+'/rest/v1/rimsa_data?id=eq.9&select=data',{headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}});
+    if(!res.ok) return;
+    const rows = await res.json();
+    if(rows && rows.length && rows[0].data){
+      var d9 = rows[0].data;
+      window._CLIENTE_DIVISIONES = d9.clienteDivisiones||{};
+      window._PLATA_MIX = {ref: d9.plataMixRef||[], porCliente: d9.plataMixPorCliente||{}};
+      if (typeof _cuCache !== 'undefined') _cuCache = null;
+    }
+  }catch(e){ if(location.protocol!=='file:') console.warn('plataMix/clienteDivisiones:',e.message); }
+})();}catch(e){}
 try{supaCargarCatalogo().then(function(prods){
   try{
     if(!prods||!prods.length) return;
@@ -15050,7 +15089,7 @@ function _cuBuildCache() {
           ganch_m: matsByTipo.ganchera_masti || null,
           ganch_mo: matsByTipo.ganchera_mogul || null,
           con_loc: con ? con.loc : '',
-          divisiones: (D.clienteDivisiones||{})[String(c.cod).padStart(10,'0')] || null,
+          divisiones: (window._CLIENTE_DIVISIONES||{})[String(c.cod).padStart(10,'0')] || null,
         };
       });
     });
@@ -15117,11 +15156,12 @@ function buildClientesUnif() {
 // surtido de referencia (los artículos más vendidos entre TODOS los clientes de
 // plataforma, según D.plataMixRef, recortado a un tope — por defecto 250).
 function _cuMixPlataforma(cod, topN){
-  var ref = (typeof D!=='undefined' && D.plataMixRef) || [];
+  var pm = window._PLATA_MIX || {};
+  var ref = pm.ref || [];
   if (!ref.length) return null;
   topN = topN || 250;
   var cod10 = String(cod).padStart(10,'0');
-  var det = (D.plataMixPorCliente||{})[cod10];
+  var det = (pm.porCliente||{})[cod10];
   var N = Math.min(topN, ref.length);
   var refTop = ref.slice(0, N);
   var compradosMap = {};
