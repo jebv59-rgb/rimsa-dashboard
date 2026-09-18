@@ -859,6 +859,17 @@ function xlsHandleFile(file){
             }
           });
           log('✅ rutas: '+filasRutaValidas.length+' filas revisadas, '+nuevosRuta+' clientes nuevos agregados a Tarea',73);
+
+          // Canal por cliente (Autoservicios, Kioscos, Almacenes, etc.), para poder
+          // desglosar la cobertura por producto+período por canal en Clientes.
+          // Aparte de D (window._CLIENTE_CANAL), sincronizado junto con
+          // clienteDivisiones/plataMix (Supabase id=9) para no inflar rim_D.
+          var clienteCanalAcc={};
+          filasRutaValidas.forEach(function(f){
+            if(f.canal) clienteCanalAcc[f.cod]=f.canal;
+          });
+          window._CLIENTE_CANAL = clienteCanalAcc;
+          log('✅ canal por cliente: '+Object.keys(clienteCanalAcc).length+' clientes con canal asignado',73);
         }
 
         // Actualizar no_compro en tasks desde kgTodos
@@ -1163,85 +1174,175 @@ function xlsHandleFile(file){
         }
       }
 
-      // ── HOJA: coberturas → compras por cliente y producto puntual (SKU) ───
-      // Tabla dinámica: fila0=periodo (ej. "Trimestre 3"), fila header="Etiquetas de fila"
-      // con cols = "NOMBRE PRODUCTO (codigo)" y última "Total general" (se ignora).
+            // ── HOJA: coberturas → compras por cliente y producto puntual (SKU) ───
+      // Tabla dinámica. Desde sep/2026 viene con detalle DIARIO: cada producto
+      // tiene un sub-bloque de columnas, una por día del mes filtrado en el
+      // origen (antes era 1 sola columna por producto = todo el trimestre).
+      // Estructura nueva:
+      //   fila "Etiquetas de columna" → fila siguiente = nombre de producto
+      //   "NOMBRE (codigo)" (forward-filled: solo aparece en la 1ª columna de
+      //   su bloque), después año, "Trimestre X", mes, y por fin la fila
+      //   "Etiquetas de fila" con el día-del-mes (1,2,3...) de cada columna.
       // Debajo: filas vendedor ("001   - NOMBRE") seguidas de sus clientes
-      // ("NOMBRE CLIENTE (codigo_cliente)"), y al final una fila "Total general".
-      var cov=toArr("coberturas");
-      if(cov&&cov.length>1){
-        var periodoCov='';
-        var fila0cov=cov[0]||[];
-        for(var pk=0;pk<fila0cov.length;pk++){
-          if(fila0cov[pk]&&String(fila0cov[pk]).trim().toLowerCase()!=='fecha'){ periodoCov=String(fila0cov[pk]).trim(); break; }
-        }
-        var hdrRowCov=-1;
-        for(var hci=0; hci<Math.min(cov.length,10); hci++){
-          var c0cov = cov[hci] && cov[hci][0];
-          if(c0cov && String(c0cov).trim().toLowerCase()==='etiquetas de fila'){ hdrRowCov=hci; break; }
-        }
-        if(hdrRowCov>=0){
-          var hdrCov = cov[hdrRowCov];
-          var colProdCov = [];
-          for(var cci=1; cci<hdrCov.length; cci++){
-            var hcov = hdrCov[cci]; if(!hcov) continue;
-            var hscov = String(hcov).trim();
-            if(/^total general$/i.test(hscov)) continue;
-            var mcodcov = hscov.match(/\((\d+)\)\s*$/);
-            if(!mcodcov) continue;
-            colProdCov.push({col:cci, codigo:parseInt(mcodcov[1],10), nombre:hscov.replace(/\s*\(\d+\)\s*$/,'').trim()});
+      // ("NOMBRE CLIENTE (codigo_cliente)"), y al final "Total general".
+      // Si no se detecta esa fila "Etiquetas de columna" (Excel viejo, formato
+      // trimestral sin desglose por día) se cae al parsing anterior: 1 columna
+      // = 1 producto, sin día.
+      var wsCov = wb.Sheets["coberturas"];
+      if(wsCov && wsCov['!ref']){
+        var MESES_COV = {enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,
+          septiembre:9,setiembre:9,octubre:10,noviembre:11,diciembre:12};
+        var covRange = XLSX.utils.decode_range(wsCov['!ref']);
+        // Cabeceras: se leen densas (son pocas filas, barato) para ubicar las
+        // filas clave y mapear cada columna a {codigo, nombre, dia}.
+        var covHeadRange = XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:Math.min(covRange.e.r,11), c:covRange.e.c}});
+        var covHead = XLSX.utils.sheet_to_json(wsCov, {header:1, defval:null, raw:true, range:covHeadRange});
+
+        var prodRowIdxCov=-1, hdrRowCov=-1;
+        function _covFilaTiene(row, texto){
+          if(!row) return false;
+          for(var qi=0; qi<Math.min(row.length,4); qi++){
+            if(row[qi] && String(row[qi]).trim().toLowerCase()===texto) return true;
           }
-          // Clientes de plataforma (AASS Select / Club Arcor / Super Almacén), ya resueltos
-          // por _matProcesarWorkbook (corre antes que este bloque) en window._PLATDET.
-          // Sirven para armar el "mix de referencia": qué artículos y en qué volumen
-          // compra el conjunto de clientes de plataforma, para poder comparar a cada uno
-          // contra ese surtido y ver qué le falta.
+          return false;
+        }
+        for(var pri=0; pri<covHead.length; pri++){
+          if(_covFilaTiene(covHead[pri], 'etiquetas de columna')){ prodRowIdxCov=pri+1; break; }
+        }
+        for(var hci=0; hci<covHead.length; hci++){
+          if(_covFilaTiene(covHead[hci], 'etiquetas de fila')){ hdrRowCov=hci; break; }
+        }
+
+        var esFormatoDiarioCov = (prodRowIdxCov>=0 && hdrRowCov>prodRowIdxCov);
+        var periodoCov='', covMesNombre='', covMesNum=0, covAnio=0, covMesKey='';
+        var colInfoCov = {}; // colIndex -> {codigo, nombre, dia|null}
+
+        if(hdrRowCov>=0){
+          var hdrCov = covHead[hdrRowCov];
+
+          if(esFormatoDiarioCov){
+            // Año / mes: están en las filas entre el nombre de producto y "Etiquetas de fila".
+            for(var mri=prodRowIdxCov+1; mri<hdrRowCov; mri++){
+              var rowm = covHead[mri]; if(!rowm) continue;
+              for(var mci=0; mci<rowm.length; mci++){
+                var vm = rowm[mci]; if(vm==null) continue;
+                var vs = String(vm).trim();
+                if(/^\d{4}$/.test(vs) && !covAnio) covAnio=parseInt(vs,10);
+                var vsl = vs.toLowerCase();
+                if(MESES_COV[vsl] && !covMesNum){ covMesNombre=vs; covMesNum=MESES_COV[vsl]; }
+              }
+              if(covAnio && covMesNum) break;
+            }
+            covMesKey = (covAnio && covMesNum) ? (covAnio+'-'+String(covMesNum).padStart(2,'0')) : '';
+            periodoCov = (covMesNombre||'?')+' '+(covAnio||'');
+
+            var prodRowCov = covHead[prodRowIdxCov];
+            var lastProdCodCov=null, lastProdNameCov=null;
+            for(var cci=1; cci<hdrCov.length; cci++){
+              var pcell = prodRowCov ? prodRowCov[cci] : null;
+              if(pcell!=null && String(pcell).trim()!==''){
+                var ps=String(pcell).trim();
+                if(/^total general$/i.test(ps)){ lastProdCodCov=null; lastProdNameCov=null; }
+                else{
+                  var mprod = ps.match(/\((\d+)\)\s*$/);
+                  if(mprod){ lastProdCodCov=parseInt(mprod[1],10); lastProdNameCov=ps.replace(/\s*\(\d+\)\s*$/,'').trim(); }
+                  else { lastProdCodCov=null; lastProdNameCov=null; }
+                }
+              }
+              if(!lastProdCodCov) continue;
+              var dcell = hdrCov[cci]; if(dcell==null) continue;
+              var diaNum = parseInt(String(dcell).trim(),10);
+              if(!diaNum || diaNum<1 || diaNum>31) continue;
+              colInfoCov[cci] = {codigo:lastProdCodCov, nombre:lastProdNameCov, dia:diaNum};
+            }
+          } else {
+            // Formato viejo: 1 columna = 1 producto, sin desglose por día.
+            var fila0cov=covHead[0]||[];
+            for(var pk=0;pk<fila0cov.length;pk++){
+              if(fila0cov[pk]&&String(fila0cov[pk]).trim().toLowerCase()!=='fecha'){ periodoCov=String(fila0cov[pk]).trim(); break; }
+            }
+            for(var cci2=1; cci2<hdrCov.length; cci2++){
+              var hcov = hdrCov[cci2]; if(!hcov) continue;
+              var hscov = String(hcov).trim();
+              if(/^total general$/i.test(hscov)) continue;
+              var mcodcov = hscov.match(/\((\d+)\)\s*$/);
+              if(!mcodcov) continue;
+              colInfoCov[cci2] = {codigo:parseInt(mcodcov[1],10), nombre:hscov.replace(/\s*\(\d+\)\s*$/,'').trim(), dia:null};
+            }
+          }
+        }
+
+        if(hdrRowCov>=0 && Object.keys(colInfoCov).length){
+          // Filas de cliente: se leen solo los valores de columna A (baratas,
+          // ~1200 celdas) para no materializar toda la grilla.
+          var cliRowMapCov = {}; // rowIndex -> cod10
+          for(var rr=hdrRowCov+1; rr<=covRange.e.r; rr++){
+            var addrA = XLSX.utils.encode_cell({r:rr,c:0});
+            var cellA = wsCov[addrA];
+            if(!cellA || cellA.v==null) continue;
+            var lblA = String(cellA.v).trim();
+            if(/^total general$/i.test(lblA)) continue;
+            if(/^\d{3}\s*-/.test(lblA)) continue; // fila de vendedor
+            var mcliA = lblA.match(/\((\d+)\)\s*$/);
+            if(!mcliA) continue;
+            cliRowMapCov[rr] = mcliA[1].padStart(10,'0');
+          }
+
+          // Clientes de plataforma (AASS Select / Club Arcor / Super Almacén), ya
+          // resueltos por _matProcesarWorkbook (corre antes que este bloque).
           var plataCodSetCov = {};
           (window._PLATDET||[]).forEach(function(p){
             if(!p.cod) return;
             plataCodSetCov[String(p.cod).padStart(10,'0')] = {nombre:p.nombre||'', vend:p.vend||''};
           });
-          var plataGlobalTotalsCov = {}; // codigo articulo -> qty total entre clientes plataforma
-          var plataAccCov = {};          // cod10 -> {nombre, vend, itemsByCod:{codigo:qty}}
+          var plataGlobalTotalsCov = {};
+          var plataAccCov = {};
+          var newProdCompras = {};
+          var setVistoCov = {};    // cod10 -> {codigo:true} (evita duplicar por múltiples días)
+          var covDetAcc = {};      // cod10 -> {codigo -> {d:{dia:qty}, q:total}} (solo si esFormatoDiarioCov)
+          var nombresPorCodCov = {};
 
-          var newProdCompras={};
-          var nCliCov=0;
-          for(var rci=hdrRowCov+1; rci<cov.length; rci++){
-            var rowcov=cov[rci]; if(!rowcov||rowcov[0]==null) continue;
-            var scov=String(rowcov[0]).trim();
-            if(/^total general$/i.test(scov)) continue;
-            var mvcov = scov.match(/^(\d{3})\s*-/);
-            if(mvcov) continue; // fila de vendedor, sin datos propios
-            var mccov = scov.match(/\((\d+)\)\s*$/);
-            if(!mccov) continue; // fila no reconocida
-            var clicodcov = mccov[1].padStart(10,'0');
-            nCliCov++;
-            var esPlataCov = plataCodSetCov[clicodcov];
-            var setcov=null;
-            for(var pci=0; pci<colProdCov.length; pci++){
-              var cpcov = colProdCov[pci];
-              var vcov = rowcov[cpcov.col];
-              var qtycov = parseFloat(vcov)||0;
-              if(qtycov>0){
-                if(!setcov) setcov = [];
-                setcov.push(cpcov.codigo);
-                if(esPlataCov){
-                  plataGlobalTotalsCov[cpcov.codigo] = (plataGlobalTotalsCov[cpcov.codigo]||0) + qtycov;
-                  if(!plataAccCov[clicodcov]) plataAccCov[clicodcov] = {nombre:esPlataCov.nombre, vend:esPlataCov.vend, itemsByCod:{}};
-                  plataAccCov[clicodcov].itemsByCod[cpcov.codigo] = (plataAccCov[clicodcov].itemsByCod[cpcov.codigo]||0) + qtycov;
-                }
-              }
+          // Recorrido disperso: solo las celdas realmente definidas en la hoja
+          // (la matriz completa es ~8.6M celdas pero <1% tienen datos).
+          var cellKeysCov = Object.keys(wsCov);
+          for(var ki=0; ki<cellKeysCov.length; ki++){
+            var addr = cellKeysCov[ki];
+            if(addr.charCodeAt(0)===33) continue; // '!' → metadata (!ref, !merges, etc.)
+            var dec = XLSX.utils.decode_cell(addr);
+            if(dec.r<=hdrRowCov || dec.c===0) continue;
+            var cod10cov = cliRowMapCov[dec.r]; if(!cod10cov) continue;
+            var ci = colInfoCov[dec.c]; if(!ci) continue;
+            var cellObj = wsCov[addr];
+            var qtycov = (cellObj && cellObj.v!=null) ? parseFloat(cellObj.v) : 0;
+            if(!qtycov || qtycov<=0) continue;
+
+            if(!nombresPorCodCov[ci.codigo]) nombresPorCodCov[ci.codigo]=ci.nombre;
+            if(!setVistoCov[cod10cov]) setVistoCov[cod10cov]={};
+            setVistoCov[cod10cov][ci.codigo]=true;
+
+            var esPlataCov = plataCodSetCov[cod10cov];
+            if(esPlataCov){
+              plataGlobalTotalsCov[ci.codigo] = (plataGlobalTotalsCov[ci.codigo]||0) + qtycov;
+              if(!plataAccCov[cod10cov]) plataAccCov[cod10cov] = {nombre:esPlataCov.nombre, vend:esPlataCov.vend, itemsByCod:{}};
+              plataAccCov[cod10cov].itemsByCod[ci.codigo] = (plataAccCov[cod10cov].itemsByCod[ci.codigo]||0) + qtycov;
             }
-            if(setcov) newProdCompras[clicodcov]=setcov;
+
+            if(esFormatoDiarioCov && ci.dia){
+              if(!covDetAcc[cod10cov]) covDetAcc[cod10cov]={};
+              if(!covDetAcc[cod10cov][ci.codigo]) covDetAcc[cod10cov][ci.codigo]={d:{},q:0};
+              covDetAcc[cod10cov][ci.codigo].d[ci.dia] = (covDetAcc[cod10cov][ci.codigo].d[ci.dia]||0) + qtycov;
+              covDetAcc[cod10cov][ci.codigo].q += qtycov;
+            }
           }
+          Object.keys(setVistoCov).forEach(function(cod10cov){
+            newProdCompras[cod10cov] = Object.keys(setVistoCov[cod10cov]).map(function(c){return parseInt(c,10);});
+          });
+
           newD.prodCompras = newProdCompras;
           newD.prodCoberturaPeriodo = periodoCov;
-          log('✅ coberturas: '+Object.keys(newProdCompras).length+' clientes con compras registradas ('+(periodoCov||'sin período')+')',74);
+          log('✅ coberturas: '+Object.keys(newProdCompras).length+' clientes con compras registradas ('+(periodoCov||'sin período')+')'+(esFormatoDiarioCov?' — detalle diario':''),74);
 
-          // Mix de plataforma: ranking global (referencia de "qué debería tener") +
-          // detalle por cliente (para ver qué le falta y qué es lo que más le vende).
-          var nombresPorCodCov = {};
-          colProdCov.forEach(function(cp){ nombresPorCodCov[cp.codigo]=cp.nombre; });
+          // Mix de plataforma: ranking global + detalle por cliente.
           var plataMixRef = Object.keys(plataGlobalTotalsCov).map(function(cod){
             return {codigo:parseInt(cod,10), nombre:nombresPorCodCov[cod]||('#'+cod), qty:plataGlobalTotalsCov[cod]};
           }).sort(function(a,b){ return b.qty-a.qty; });
@@ -1257,16 +1358,29 @@ function xlsHandleFile(file){
               items: itemsCli
             };
           });
-          // Igual que clienteDivisiones: aparte de D (window._PLATA_MIX), sincronizado
-          // solo, para no inflar rim_D y volver a pasar el cupo de localStorage.
+          // Aparte de D (window._PLATA_MIX), sincronizado solo, para no inflar
+          // rim_D y volver a pasar el cupo de localStorage.
           window._PLATA_MIX = {ref: plataMixRef, porCliente: plataMixPorCliente};
           log('✅ mix plataforma: '+plataMixRef.length+' artículos de referencia, '+Object.keys(plataMixPorCliente).length+' clientes con detalle',75);
+
+          // Historial mensual con detalle diario (para cobertura por producto +
+          // rango de fechas en Clientes). Se acumula mes a mes — no se pisa lo
+          // de meses anteriores, solo se reemplaza el mes de este upload.
+          // También aparte de D/rim_D, sincronizado a Supabase id=10.
+          if(esFormatoDiarioCov && covMesKey){
+            if(!window._COV_HIST) window._COV_HIST={};
+            window._COV_HIST[covMesKey] = {
+              anio:covAnio, mesNum:covMesNum, mesNombre:covMesNombre,
+              nombresPorCod:nombresPorCodCov, clientes:covDetAcc
+            };
+            log('✅ cobertura diaria: mes '+periodoCov+' guardado en historial ('+Object.keys(covDetAcc).length+' clientes con detalle día a día)',76);
+          }
         } else {
           log('⚠️ coberturas: no se encontró la fila de encabezados ("Etiquetas de fila")',74);
         }
       }
 
-      // ── HOJA: clientes con frezer → reconstruir lista completa ────────────
+// ── HOJA: clientes con frezer → reconstruir lista completa ────────────
       // cols (0-based): cliente=H(7), KG2026=P(15)+R(17)+T(19), KG2025=J(9)+L(11)+N(13)
       var frza=toArr("clientes con frezer");
       if(frza && frza.length>7){
@@ -1642,18 +1756,31 @@ function xlsHandleFile(file){
       jbinGuardar(newD).then(function(ok){
         xlsOK(ok?'✅ Datos sincronizados en Supabase':'✅ Guardado localmente (sin conexión)',true);
       });
-      // Mix de plataforma y divisiones por cliente van aparte (id=9): no forman parte
-      // de newD/rim_D a propósito (ver comentario donde se calculan), así que se
-      // sincronizan con su propio POST.
-      if (window._CLIENTE_DIVISIONES || window._PLATA_MIX) {
+      // Mix de plataforma, divisiones por cliente y canal van aparte (id=9): no
+      // forman parte de newD/rim_D a propósito (ver comentario donde se calculan),
+      // así que se sincronizan con su propio POST.
+      if (window._CLIENTE_DIVISIONES || window._PLATA_MIX || window._CLIENTE_CANAL) {
         fetch(SUPA_URL+'/rest/v1/rimsa_data', {
           method:'POST',
           headers:{'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'resolution=merge-duplicates'},
           body: JSON.stringify({id:9, data:{
             clienteDivisiones: window._CLIENTE_DIVISIONES||{},
             plataMixRef: (window._PLATA_MIX&&window._PLATA_MIX.ref)||[],
-            plataMixPorCliente: (window._PLATA_MIX&&window._PLATA_MIX.porCliente)||{}
+            plataMixPorCliente: (window._PLATA_MIX&&window._PLATA_MIX.porCliente)||{},
+            clienteCanal: window._CLIENTE_CANAL||{}
           }})
+        }).catch(function(){});
+      }
+      // Historial mensual de cobertura por producto+día (id=10) — se acumula mes
+      // a mes (no se pisa lo de meses anteriores). window._COV_HIST ya trae los
+      // meses previos restaurados al cargar la página (ver loader más abajo), así
+      // que acá solo hace falta mandar el objeto completo (incluye el mes recién
+      // cargado). Aparte de D/rim_D por el mismo motivo que lo anterior.
+      if (window._COV_HIST && Object.keys(window._COV_HIST).length) {
+        fetch(SUPA_URL+'/rest/v1/rimsa_data', {
+          method:'POST',
+          headers:{'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'resolution=merge-duplicates'},
+          body: JSON.stringify({id:10, data:{ covHist: window._COV_HIST }})
         }).catch(function(){});
       }
 
@@ -1987,6 +2114,16 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     </select>
     <span id="cu-count" style="font-size:12px;color:#6b7280;white-space:nowrap">0 clientes</span>
   </div>
+
+  <!-- COBERTURA POR PRODUCTO Y PERÍODO -->
+  <div style="background:#fff;border-radius:10px;padding:14px;margin-bottom:14px;border:1px solid #e5e7eb">
+    <div onclick="toggleCovPanel()" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+      <strong style="color:#1A3A6B;font-size:14px">📊 Cobertura por producto y período</strong>
+      <span id="cov-panel-arrow" style="color:#6b7280">▾</span>
+    </div>
+    <div id="cov-panel" style="display:none;margin-top:12px"></div>
+  </div>
+
   <div id="cu-wrap"></div>
   <div id="cu-table-wrap"></div>
   <!-- TABLA -->
@@ -10847,10 +10984,10 @@ try{(async function(){
     if (document.getElementById('mod-matdash') && typeof buildMatDash === 'function') buildMatDash();
   }catch(e){ if(location.protocol!=='file:') console.warn('matOverrides:',e.message); }
 })();}catch(e){}
-// Mix de plataforma y divisiones por cliente (id=9) — se calculan en cada carga de
-// Excel pero se guardan aparte de D (ver comentario en el pipeline) para no pasar el
-// cupo de localStorage. Se restauran acá para que la pestaña Clientes los tenga
-// disponibles sin necesidad de volver a subir el Excel en esta sesión del navegador.
+// Mix de plataforma, divisiones y canal por cliente (id=9) — se calculan en cada
+// carga de Excel pero se guardan aparte de D (ver comentario en el pipeline) para
+// no pasar el cupo de localStorage. Se restauran acá para que la pestaña Clientes
+// los tenga disponibles sin necesidad de volver a subir el Excel en esta sesión.
 try{(async function(){
   try{
     const res = await fetch(SUPA_URL+'/rest/v1/rimsa_data?id=eq.9&select=data',{headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}});
@@ -10860,9 +10997,27 @@ try{(async function(){
       var d9 = rows[0].data;
       window._CLIENTE_DIVISIONES = d9.clienteDivisiones||{};
       window._PLATA_MIX = {ref: d9.plataMixRef||[], porCliente: d9.plataMixPorCliente||{}};
+      window._CLIENTE_CANAL = d9.clienteCanal||{};
       if (typeof _cuCache !== 'undefined') _cuCache = null;
     }
-  }catch(e){ if(location.protocol!=='file:') console.warn('plataMix/clienteDivisiones:',e.message); }
+  }catch(e){ if(location.protocol!=='file:') console.warn('plataMix/clienteDivisiones/canal:',e.message); }
+})();}catch(e){}
+// Historial mensual de cobertura por producto+día (id=10) — acumulado entre
+// cargas de Excel (cada mes que se sube se agrega, no se pisan los anteriores).
+// Se usa en la pestaña Clientes para medir cobertura de un set de productos en
+// un rango de fechas que puede abarcar varios meses ya subidos.
+try{(async function(){
+  try{
+    const res = await fetch(SUPA_URL+'/rest/v1/rimsa_data?id=eq.10&select=data',{headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}});
+    if(!res.ok) return;
+    const rows = await res.json();
+    if(rows && rows.length && rows[0].data){
+      // Merge (no reemplazo total): si el usuario ya subió un Excel en esta misma
+      // sesión antes de que esta carga terminara, no queremos pisar ese mes recién
+      // agregado con la versión vieja que traiga Supabase.
+      window._COV_HIST = Object.assign({}, rows[0].data.covHist||{}, window._COV_HIST||{});
+    }
+  }catch(e){ if(location.protocol!=='file:') console.warn('covHist:',e.message); }
 })();}catch(e){}
 try{supaCargarCatalogo().then(function(prods){
   try{
@@ -15150,6 +15305,284 @@ function buildClientesUnif() {
 
   _cuPagina = 0;
   _cuRenderPagina();
+}
+
+// ── COBERTURA POR PRODUCTO Y PERÍODO (pestaña Clientes) ─────────────────────
+// A diferencia del mix de plataforma (fijo, top-N vs surtido de referencia) o
+// de los "grupos" de Segmentación (fijo, todo el período cargado), esto deja
+// elegir CUALQUIER combinación de productos (código manual o por línea/rubro
+// del catálogo de precios) y CUALQUIER rango de fechas dentro de los meses ya
+// subidos (window._COV_HIST, acumulado mes a mes — ver pipeline de Excel).
+var _covUltimoResultado = null;
+
+function toggleCovPanel(){
+  var panel = document.getElementById('cov-panel');
+  var arrow = document.getElementById('cov-panel-arrow');
+  if(!panel) return;
+  var abrir = panel.style.display === 'none';
+  panel.style.display = abrir ? 'block' : 'none';
+  if(arrow) arrow.textContent = abrir ? '▴' : '▾';
+  if(abrir && !panel.dataset.init){
+    panel.dataset.init = '1';
+    renderCovPanel();
+  }
+}
+
+function _covMesesDisponibles(){
+  var hist = window._COV_HIST || {};
+  return Object.keys(hist).sort().map(function(key){
+    var m = hist[key];
+    return {key:key, label:(m.mesNombre||key)+' '+(m.anio||'')};
+  });
+}
+
+function _covCatalogoNegociosSegmentos(){
+  var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
+  var negocios={}, segmentos={};
+  Object.values(cat).forEach(function(p){
+    if(p.negocio){ var n=String(p.negocio).trim(); negocios[n.toUpperCase()]=n; }
+    if(p.segmento){ var s=String(p.segmento).trim(); segmentos[s.toUpperCase()]=s; }
+  });
+  return {
+    negocios: Object.keys(negocios).sort().map(function(k){return {key:k, label:negocios[k]};}),
+    segmentos: Object.keys(segmentos).sort().map(function(k){return {key:k, label:segmentos[k]};})
+  };
+}
+
+function renderCovPanel(){
+  var panel = document.getElementById('cov-panel');
+  if(!panel) return;
+  var meses = _covMesesDisponibles();
+  var catSel = _covCatalogoNegociosSegmentos();
+
+  if(!meses.length){
+    panel.innerHTML = '<div class="muted" style="font-size:12px;padding:6px 0">'
+      + 'Todavía no hay ningún mes con detalle diario de coberturas cargado. '
+      + 'Subí un Excel con la hoja "coberturas" en formato diario (producto × día) para poder usar esto.</div>';
+    return;
+  }
+
+  var mesOptsDesde = meses.map(function(m,i){ return '<option value="'+m.key+'"'+(i===0?' selected':'')+'>'+m.label+'</option>'; }).join('');
+  var mesOptsHasta = meses.map(function(m,i){ return '<option value="'+m.key+'"'+(i===meses.length-1?' selected':'')+'>'+m.label+'</option>'; }).join('');
+  var negOpts = catSel.negocios.map(function(n){ return '<option value="'+n.key.replace(/"/g,'&quot;')+'">'+n.label+'</option>'; }).join('');
+  var segOpts = catSel.segmentos.map(function(s){ return '<option value="'+s.key.replace(/"/g,'&quot;')+'">'+s.label+'</option>'; }).join('');
+
+  panel.innerHTML =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
+      '<div>' +
+        '<div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:4px">Productos</div>' +
+        '<textarea id="cov-cods" placeholder="Códigos de artículo, separados por coma o espacio (ej: 1608 15383 2528)" ' +
+          'style="width:100%;min-height:46px;border:1px solid #d1d5db;border-radius:6px;padding:6px 8px;font-size:12px;box-sizing:border-box"></textarea>' +
+        '<div style="display:flex;gap:8px;margin-top:6px">' +
+          '<div style="flex:1">' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Línea (negocio)</div>' +
+            '<select id="cov-negocios" multiple size="5" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+negOpts+'</select>' +
+          '</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Rubro (segmento)</div>' +
+            '<select id="cov-segmentos" multiple size="5" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+segOpts+'</select>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div>' +
+        '<div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:4px">Período</div>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<div style="flex:1">' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Desde (mes / día)</div>' +
+            '<div style="display:flex;gap:4px">' +
+              '<select id="cov-mes-desde" style="flex:1;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:5px">'+mesOptsDesde+'</select>' +
+              '<input id="cov-dia-desde" type="number" min="1" max="31" value="1" style="width:52px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:5px">' +
+            '</div>' +
+          '</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Hasta (mes / día)</div>' +
+            '<div style="display:flex;gap:4px">' +
+              '<select id="cov-mes-hasta" style="flex:1;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:5px">'+mesOptsHasta+'</select>' +
+              '<input id="cov-dia-hasta" type="number" min="1" max="31" value="31" style="width:52px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:5px">' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="muted" style="font-size:11px;margin-top:6px;color:#6b7280">'+
+          'El rango solo puede abarcar meses que ya se hayan subido (con la hoja "coberturas" en formato diario). '+
+          'Para comparar contra un mes que todavía no cargaste, subí ese Excel primero.'+
+        '</div>' +
+        '<button onclick="covCalcular()" style="margin-top:10px;background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Calcular cobertura</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="cov-resultado" style="margin-top:14px"></div>';
+}
+
+// Universo de clientes con canal (extiende el patrón de _segUniversoTodos, que
+// solo trae cod+vend, agregando canal desde window._CLIENTE_CANAL).
+function _covUniverso(){
+  var seen={}, out=[];
+  var canalMap = window._CLIENTE_CANAL || {};
+  Object.keys(D.tasks||{}).forEach(function(vend){
+    Object.values(D.tasks[vend]).forEach(function(lista){
+      (lista||[]).forEach(function(c){
+        if(seen[c.cod]) return;
+        seen[c.cod]=true;
+        var cod10 = String(c.cod).padStart(10,'0');
+        out.push({cod:c.cod, vend_cod:vend, canal: c.canal || canalMap[c.cod] || canalMap[cod10] || 'Sin canal'});
+      });
+    });
+  });
+  return out;
+}
+
+function _covResolverProductos(){
+  var codigos = {};
+  var raw = ((document.getElementById('cov-cods')||{}).value||'').trim();
+  if(raw){
+    raw.split(/[\s,;]+/).forEach(function(t){
+      var n = parseInt(t,10);
+      if(n) codigos[n]=true;
+    });
+  }
+  var negSel = Array.from((document.getElementById('cov-negocios')||{}).selectedOptions||[]).map(function(o){return o.value;});
+  var segSel = Array.from((document.getElementById('cov-segmentos')||{}).selectedOptions||[]).map(function(o){return o.value;});
+  if(negSel.length || segSel.length){
+    var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
+    Object.values(cat).forEach(function(p){
+      var n = p.negocio ? String(p.negocio).trim().toUpperCase() : '';
+      var s = p.segmento ? String(p.segmento).trim().toUpperCase() : '';
+      if((negSel.length && negSel.indexOf(n)>=0) || (segSel.length && segSel.indexOf(s)>=0)){
+        codigos[parseInt(p.articulo,10)]=true;
+      }
+    });
+  }
+  return Object.keys(codigos).map(function(c){return parseInt(c,10);});
+}
+
+// Arma la lista de meses (con su rango de días permitido dentro del mes) que
+// caen entre mesDesde/diaDesde y mesHasta/diaHasta, usando solo los meses que
+// existan en window._COV_HIST (no inventa datos de meses no subidos).
+function _covResolverRango(mesDesde, diaDesde, mesHasta, diaHasta){
+  var mesesDisp = Object.keys(window._COV_HIST||{}).sort();
+  var i0 = mesesDisp.indexOf(mesDesde);
+  var i1 = mesesDisp.indexOf(mesHasta);
+  if(i0<0 || i1<0 || i1<i0) return [];
+  var out=[];
+  for(var i=i0;i<=i1;i++){
+    var key=mesesDisp[i];
+    var dMin = (key===mesDesde) ? diaDesde : 1;
+    var dMax = (key===mesHasta) ? diaHasta : 31;
+    out.push({mesKey:key, diaMin:dMin, diaMax:dMax});
+  }
+  return out;
+}
+
+function _covClienteComproEnRango(cod10, codigosSet, rango){
+  var hist = window._COV_HIST||{};
+  for(var ri=0; ri<rango.length; ri++){
+    var r = rango[ri];
+    var mes = hist[r.mesKey];
+    if(!mes || !mes.clientes) continue;
+    var detCli = mes.clientes[cod10];
+    if(!detCli) continue;
+    var codsCli = Object.keys(detCli);
+    for(var ci=0; ci<codsCli.length; ci++){
+      var codigo = parseInt(codsCli[ci],10);
+      if(!codigosSet[codigo]) continue;
+      var dias = detCli[codsCli[ci]].d || {};
+      var diasKeys = Object.keys(dias);
+      for(var di=0; di<diasKeys.length; di++){
+        var dNum = parseInt(diasKeys[di],10);
+        if(dNum>=r.diaMin && dNum<=r.diaMax) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function covCalcular(){
+  var codigosArr = _covResolverProductos();
+  if(!codigosArr.length){
+    document.getElementById('cov-resultado').innerHTML = '<div class="muted" style="font-size:12px;color:#B01020">Elegí al menos un producto (código manual o línea/rubro).</div>';
+    return;
+  }
+  var codigosSet = {}; codigosArr.forEach(function(c){codigosSet[c]=true;});
+
+  var mesDesde = (document.getElementById('cov-mes-desde')||{}).value;
+  var mesHasta = (document.getElementById('cov-mes-hasta')||{}).value;
+  var diaDesde = parseInt((document.getElementById('cov-dia-desde')||{}).value,10)||1;
+  var diaHasta = parseInt((document.getElementById('cov-dia-hasta')||{}).value,10)||31;
+  var rango = _covResolverRango(mesDesde, diaDesde, mesHasta, diaHasta);
+  if(!rango.length){
+    document.getElementById('cov-resultado').innerHTML = '<div class="muted" style="font-size:12px;color:#B01020">Rango de fechas inválido (el mes "hasta" debe ser igual o posterior al "desde", y ambos deben estar entre los meses ya subidos).</div>';
+    return;
+  }
+
+  var universo = _covUniverso();
+  var porVend = {}, porCanal = {};
+  var compGlob = 0;
+  universo.forEach(function(cli){
+    var cod10 = String(cli.cod).padStart(10,'0');
+    var compro = _covClienteComproEnRango(cod10, codigosSet, rango);
+    if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
+    porVend[cli.vend_cod].universo++;
+    var canalN = cli.canal || 'Sin canal';
+    if(!porCanal[canalN]) porCanal[canalN]={universo:0,compradores:0};
+    porCanal[canalN].universo++;
+    if(compro){
+      compGlob++;
+      porVend[cli.vend_cod].compradores++;
+      porCanal[canalN].compradores++;
+    }
+  });
+
+  _covUltimoResultado = {
+    universo: universo.length, compradores: compGlob,
+    pct: universo.length ? Math.round(compGlob/universo.length*1000)/10 : 0,
+    porVendedor: porVend, porCanal: porCanal,
+    productos: codigosArr.length, rango: rango
+  };
+  _covRenderResultado(_covUltimoResultado);
+}
+
+function _covRenderResultado(res){
+  var vendNombres = {};
+  (D.vendors||[]).forEach(function(v){ vendNombres[v.cod]=v.nombre; });
+
+  function filaBarra(label, u, c){
+    var pct = u ? Math.round(c/u*1000)/10 : 0;
+    var color = pct>=70 ? '#1B7F3A' : (pct>=40 ? '#F5B800' : '#B01020');
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
+      '<div style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+label+'">'+label+'</div>' +
+      '<div style="flex:1;background:#eef2f7;border-radius:4px;height:14px;overflow:hidden">' +
+        '<div style="width:'+pct+'%;background:'+color+';height:100%"></div>' +
+      '</div>' +
+      '<div style="width:110px;text-align:right;color:#374151">'+c+' / '+u+' ('+pct+'%)</div>' +
+    '</div>';
+  }
+
+  var vendRows = Object.keys(res.porVendedor).sort(function(a,b){
+    return (vendNombres[a]||a).localeCompare(vendNombres[b]||b,'es');
+  }).map(function(v){
+    var d = res.porVendedor[v];
+    return filaBarra(v+' — '+(vendNombres[v]||'?'), d.universo, d.compradores);
+  }).join('');
+
+  var canalRows = Object.keys(res.porCanal).sort().map(function(cn){
+    var d = res.porCanal[cn];
+    return filaBarra(cn, d.universo, d.compradores);
+  }).join('');
+
+  document.getElementById('cov-resultado').innerHTML =
+    '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">' +
+      '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
+        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+res.pct+'%</div>' +
+        '<div style="font-size:11px;color:#6b7280">COBERTURA GLOBAL — '+res.compradores+' de '+res.universo+' clientes</div>' +
+      '</div>' +
+      '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
+        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+res.productos+'</div>' +
+        '<div style="font-size:11px;color:#6b7280">PRODUCTOS INCLUIDOS EN EL CÁLCULO</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
+      '<div><div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:6px">Por vendedor</div>'+(vendRows||'<div class="muted" style="font-size:12px">Sin datos.</div>')+'</div>' +
+      '<div><div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:6px">Por canal</div>'+(canalRows||'<div class="muted" style="font-size:12px">Sin datos.</div>')+'</div>' +
+    '</div>';
 }
 
 // Mix de productos de plataforma: compara lo que compró un cliente contra el
