@@ -15432,7 +15432,7 @@ function _covUniverso(){
         if(seen[c.cod]) return;
         seen[c.cod]=true;
         var cod10 = String(c.cod).padStart(10,'0');
-        out.push({cod:c.cod, vend_cod:vend, canal: c.canal || canalMap[c.cod] || canalMap[cod10] || 'Sin canal'});
+        out.push({cod:c.cod, nombre:c.nombre||'', vend_cod:vend, canal: c.canal || canalMap[c.cod] || canalMap[cod10] || 'Sin canal'});
       });
     });
   });
@@ -15534,6 +15534,7 @@ function covCalcular(){
   // tampoco puede aparecer en el desglose de más de un vendedor a la vez.
   var universo = _covUniverso();
   var porVend = {}, porCanal = {};
+  var noCompPorVend = {}; // vendCod -> [{cod,nombre}] — para el envío por WhatsApp
   var compGlob = 0;
   universo.forEach(function(cli){
     var cod10 = String(cli.cod).padStart(10,'0');
@@ -15548,14 +15549,20 @@ function covCalcular(){
       compGlob++;
       porVend[cli.vend_cod].compradores++;
       porCanal[canalN].compradores++;
+    } else {
+      if(!noCompPorVend[cli.vend_cod]) noCompPorVend[cli.vend_cod]=[];
+      noCompPorVend[cli.vend_cod].push({cod:cli.cod, nombre:cli.nombre||('#'+cli.cod), cantidad:cantidad});
     }
+  });
+  Object.keys(noCompPorVend).forEach(function(v){
+    noCompPorVend[v].sort(function(a,b){ return (a.nombre||'').localeCompare(b.nombre||'','es'); });
   });
 
   _covUltimoResultado = {
     universo: universo.length, compradores: compGlob,
     pct: universo.length ? Math.round(compGlob/universo.length*1000)/10 : 0,
-    porVendedor: porVend, porCanal: porCanal,
-    productos: codigosArr.length, rango: rango, minimo: minimoCant
+    porVendedor: porVend, porCanal: porCanal, noCompPorVend: noCompPorVend,
+    productos: codigosArr.length, productosCods: codigosArr, rango: rango, minimo: minimoCant
   };
   _covRenderResultado(_covUltimoResultado);
 }
@@ -15564,15 +15571,16 @@ function _covRenderResultado(res){
   var vendNombres = {};
   (D.vendors||[]).forEach(function(v){ vendNombres[v.cod]=v.nombre; });
 
-  function filaBarra(label, u, c){
+  function filaBarra(label, u, c, waBtn){
     var pct = u ? Math.round(c/u*1000)/10 : 0;
     var color = pct>=70 ? '#1B7F3A' : (pct>=40 ? '#F5B800' : '#B01020');
     return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">' +
-      '<div style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+label+'">'+label+'</div>' +
+      '<div style="width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+label+'">'+label+'</div>' +
       '<div style="flex:1;background:#eef2f7;border-radius:4px;height:14px;overflow:hidden">' +
         '<div style="width:'+pct+'%;background:'+color+';height:100%"></div>' +
       '</div>' +
-      '<div style="width:110px;text-align:right;color:#374151">'+c+' / '+u+' ('+pct+'%)</div>' +
+      '<div style="width:100px;text-align:right;color:#374151">'+c+' / '+u+' ('+pct+'%)</div>' +
+      (waBtn||'') +
     '</div>';
   }
 
@@ -15580,7 +15588,12 @@ function _covRenderResultado(res){
     return (vendNombres[a]||a).localeCompare(vendNombres[b]||b,'es');
   }).map(function(v){
     var d = res.porVendedor[v];
-    return filaBarra(v+' — '+(vendNombres[v]||'?'), d.universo, d.compradores);
+    var nNoComp = (res.noCompPorVend[v]||[]).length;
+    var waBtn = nNoComp
+      ? '<button onclick="enviarCovNoCompradoresWA(\''+v+'\')" title="Enviar lista de no compradores por WhatsApp" '+
+        'style="background:none;border:none;cursor:pointer;font-size:14px;padding:0 0 0 4px">💬</button>'
+      : '';
+    return filaBarra(v+' — '+(vendNombres[v]||'?'), d.universo, d.compradores, waBtn);
   }).join('');
 
   var canalRows = Object.keys(res.porCanal).sort().map(function(cn){
@@ -15607,6 +15620,50 @@ function _covRenderResultado(res){
       '<div><div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:6px">Por vendedor</div>'+(vendRows||'<div class="muted" style="font-size:12px">Sin datos.</div>')+'</div>' +
       '<div><div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:6px">Por canal</div>'+(canalRows||'<div class="muted" style="font-size:12px">Sin datos.</div>')+'</div>' +
     '</div>';
+}
+
+// Arma el nombre de producto(s) y el texto del período para encabezar el
+// mensaje de WhatsApp (mismo criterio para todos los vendedores).
+function _covDescripcionProductosPeriodo(res){
+  var hist = window._COV_HIST||{};
+  var nombres = {};
+  (res.rango||[]).forEach(function(r){
+    var mes = hist[r.mesKey];
+    if(mes && mes.nombresPorCod) Object.assign(nombres, mes.nombresPorCod);
+  });
+  var listaProd = (res.productosCods||[]).map(function(c){ return nombres[c] || ('#'+c); }).join(', ');
+  var r0 = (res.rango||[])[0], r1 = (res.rango||[])[(res.rango||[]).length-1];
+  var periodoTxt = r0 ? (r0.mesKey+' día '+r0.diaMin+' al '+(r1?r1.mesKey:r0.mesKey)+' día '+(r1?r1.diaMax:r0.diaMax)) : '';
+  return {listaProd:listaProd, periodoTxt:periodoTxt};
+}
+
+// Envía por WhatsApp, a un vendedor puntual, la lista de sus clientes que NO
+// llegaron a la cantidad mínima definida en el panel de Cobertura por producto
+// y período. Mismo patrón que enviarNoCompradoresVendWA (Materiales): arma el
+// texto y abre wa.me / navigator.share para que el usuario elija el contacto.
+function enviarCovNoCompradoresWA(vendCod){
+  var res = _covUltimoResultado;
+  if(!res || !res.noCompPorVend){ mostrarToast('Primero calculá la cobertura.'); return; }
+  var lista = res.noCompPorVend[vendCod] || [];
+  if(!lista.length){ mostrarToast('Ese vendedor no tiene clientes sin cubrir con este filtro.'); return; }
+  var vendNombres = {};
+  (D.vendors||[]).forEach(function(v){ vendNombres[v.cod]=v.nombre; });
+  var info = _covDescripcionProductosPeriodo(res);
+
+  var texto = '*RIMSA — No compradores · '+vendCod+' — '+(vendNombres[vendCod]||'')+'*\n';
+  if(info.listaProd) texto += '_Productos: '+info.listaProd+'_\n';
+  if(info.periodoTxt) texto += '_Período: '+info.periodoTxt+'_\n';
+  texto += '_Mínimo para contar como cubierto: '+res.minimo+' unidades (surtidas)_\n\n';
+  lista.forEach(function(c){
+    texto += '• '+c.nombre+(c.cantidad>0?' (llevaba '+c.cantidad+')':'')+'\n';
+  });
+  texto += '\n_Total: '+lista.length+' sin cubrir_';
+
+  if (navigator.share) {
+    navigator.share({title:'No compradores · '+vendCod, text:texto}).catch(function(){});
+  } else {
+    window.open('https://wa.me/?text='+encodeURIComponent(texto), '_blank');
+  }
 }
 
 // Mix de productos de plataforma: compara lo que compró un cliente contra el
