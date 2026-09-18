@@ -15406,7 +15406,16 @@ function renderCovPanel(){
           'El rango solo puede abarcar meses que ya se hayan subido (con la hoja "coberturas" en formato diario). '+
           'Para comparar contra un mes que todavía no cargaste, subí ese Excel primero.'+
         '</div>' +
-        '<button onclick="covCalcular()" style="margin-top:10px;background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Calcular cobertura</button>' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-top:10px">' +
+          '<div>' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Cantidad mínima (surtida entre los productos elegidos)</div>' +
+            '<input id="cov-minimo" type="number" min="1" step="1" value="1" style="width:80px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:6px">' +
+          '</div>' +
+          '<button onclick="covCalcular()" style="align-self:flex-end;background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Calcular cobertura</button>' +
+        '</div>' +
+        '<div class="muted" style="font-size:11px;margin-top:4px;color:#6b7280">'+
+          'Ej: si elegís 4 sabores de Traviata y ponés mínimo 6, cuenta como cubierto a cualquier cliente que haya comprado 6 unidades en total entre esos 4 sabores (en cualquier combinación), no 6 de cada uno.'+
+        '</div>' +
       '</div>' +
     '</div>' +
     '<div id="cov-resultado" style="margin-top:14px"></div>';
@@ -15472,8 +15481,13 @@ function _covResolverRango(mesDesde, diaDesde, mesHasta, diaHasta){
   return out;
 }
 
-function _covClienteComproEnRango(cod10, codigosSet, rango){
+// Suma la cantidad comprada por el cliente entre TODOS los productos elegidos
+// (surtido: da lo mismo qué combinación de esos productos compuso el total),
+// dentro del rango de fechas. covCalcular() compara esta suma contra el mínimo
+// que haya puesto el usuario (por defecto 1 = "compró algo, lo que sea").
+function _covCantidadClienteEnRango(cod10, codigosSet, rango){
   var hist = window._COV_HIST||{};
+  var total = 0;
   for(var ri=0; ri<rango.length; ri++){
     var r = rango[ri];
     var mes = hist[r.mesKey];
@@ -15488,11 +15502,11 @@ function _covClienteComproEnRango(cod10, codigosSet, rango){
       var diasKeys = Object.keys(dias);
       for(var di=0; di<diasKeys.length; di++){
         var dNum = parseInt(diasKeys[di],10);
-        if(dNum>=r.diaMin && dNum<=r.diaMax) return true;
+        if(dNum>=r.diaMin && dNum<=r.diaMax) total += dias[diasKeys[di]];
       }
     }
   }
-  return false;
+  return total;
 }
 
 function covCalcular(){
@@ -15502,6 +15516,8 @@ function covCalcular(){
     return;
   }
   var codigosSet = {}; codigosArr.forEach(function(c){codigosSet[c]=true;});
+  var minimoCant = parseFloat((document.getElementById('cov-minimo')||{}).value);
+  if(!minimoCant || minimoCant<0) minimoCant = 1;
 
   var mesDesde = (document.getElementById('cov-mes-desde')||{}).value;
   var mesHasta = (document.getElementById('cov-mes-hasta')||{}).value;
@@ -15513,12 +15529,16 @@ function covCalcular(){
     return;
   }
 
+  // Universo sin duplicar clientes entre vendedores: cada cliente se cuenta una
+  // sola vez en total (_covUniverso ya dedupea por código de cliente), así que
+  // tampoco puede aparecer en el desglose de más de un vendedor a la vez.
   var universo = _covUniverso();
   var porVend = {}, porCanal = {};
   var compGlob = 0;
   universo.forEach(function(cli){
     var cod10 = String(cli.cod).padStart(10,'0');
-    var compro = _covClienteComproEnRango(cod10, codigosSet, rango);
+    var cantidad = _covCantidadClienteEnRango(cod10, codigosSet, rango);
+    var compro = cantidad >= minimoCant;
     if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
     porVend[cli.vend_cod].universo++;
     var canalN = cli.canal || 'Sin canal';
@@ -15535,7 +15555,7 @@ function covCalcular(){
     universo: universo.length, compradores: compGlob,
     pct: universo.length ? Math.round(compGlob/universo.length*1000)/10 : 0,
     porVendedor: porVend, porCanal: porCanal,
-    productos: codigosArr.length, rango: rango
+    productos: codigosArr.length, rango: rango, minimo: minimoCant
   };
   _covRenderResultado(_covUltimoResultado);
 }
@@ -15577,6 +15597,10 @@ function _covRenderResultado(res){
       '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
         '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+res.productos+'</div>' +
         '<div style="font-size:11px;color:#6b7280">PRODUCTOS INCLUIDOS EN EL CÁLCULO</div>' +
+      '</div>' +
+      '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
+        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">≥ '+res.minimo+'</div>' +
+        '<div style="font-size:11px;color:#6b7280">UNIDADES MÍNIMAS (SURTIDAS) PARA CONTAR COMO CUBIERTO</div>' +
       '</div>' +
     '</div>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
