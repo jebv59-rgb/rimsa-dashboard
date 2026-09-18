@@ -15591,6 +15591,32 @@ function _covCantidadClienteEnRango(cod10, codigosSet, rango){
   return total;
 }
 
+// Si el cliente compró CUALQUIER producto (no solo los elegidos para medir)
+// dentro del rango de fechas. Se usa para el universo: la cobertura se mide
+// sobre los clientes que estuvieron activos (compraron algo) en esos días
+// puntuales — no sobre todos los de la ruta, ni sobre los compradores del mes
+// completo si el rango elegido es más chico que el mes.
+function _covActivoEnRango(cod10, rango){
+  var hist = window._COV_HIST||{};
+  for(var ri=0; ri<rango.length; ri++){
+    var r = rango[ri];
+    var mes = hist[r.mesKey];
+    if(!mes || !mes.clientes) continue;
+    var detCli = mes.clientes[cod10];
+    if(!detCli) continue;
+    var codsCli = Object.keys(detCli);
+    for(var ci=0; ci<codsCli.length; ci++){
+      var dias = detCli[codsCli[ci]].d || {};
+      var diasKeys = Object.keys(dias);
+      for(var di=0; di<diasKeys.length; di++){
+        var dNum = parseInt(diasKeys[di],10);
+        if(dNum>=r.diaMin && dNum<=r.diaMax) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function covCalcular(){
   var codigosArr = _covResolverProductos();
   if(!codigosArr.length){
@@ -15614,12 +15640,18 @@ function covCalcular(){
   // Universo sin duplicar clientes entre vendedores: cada cliente se cuenta una
   // sola vez en total (_covUniverso ya dedupea por código de cliente), así que
   // tampoco puede aparecer en el desglose de más de un vendedor a la vez.
-  var universo = _covUniverso();
+  // El universo (denominador) son los clientes que compraron ALGO (cualquier
+  // producto, no solo los elegidos) dentro del rango de fechas puntual — no
+  // todos los de la ruta, ni el total de compradores del mes completo si el
+  // rango es más chico que el mes.
+  var universoBase = _covUniverso();
   var porVend = {}, porCanal = {};
   var noCompPorVend = {}; // vendCod -> [{cod,nombre}] — para el envío por WhatsApp
-  var compGlob = 0;
-  universo.forEach(function(cli){
+  var compGlob = 0, universoCount = 0;
+  universoBase.forEach(function(cli){
     var cod10 = String(cli.cod).padStart(10,'0');
+    if(!_covActivoEnRango(cod10, rango)) return; // no compró nada en el rango: no entra en el universo
+    universoCount++;
     var cantidad = _covCantidadClienteEnRango(cod10, codigosSet, rango);
     var compro = cantidad >= minimoCant;
     if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
@@ -15641,10 +15673,11 @@ function covCalcular(){
   });
 
   _covUltimoResultado = {
-    universo: universo.length, compradores: compGlob,
-    pct: universo.length ? Math.round(compGlob/universo.length*1000)/10 : 0,
+    universo: universoCount, compradores: compGlob,
+    pct: universoCount ? Math.round(compGlob/universoCount*1000)/10 : 0,
     porVendedor: porVend, porCanal: porCanal, noCompPorVend: noCompPorVend,
-    productos: codigosArr.length, productosCods: codigosArr, rango: rango, minimo: minimoCant
+    productos: codigosArr.length, productosCods: codigosArr, rango: rango, minimo: minimoCant,
+    universoTotalRuta: universoBase.length
   };
   _covRenderResultado(_covUltimoResultado);
 }
@@ -15687,7 +15720,8 @@ function _covRenderResultado(res){
     '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">' +
       '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
         '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+res.pct+'%</div>' +
-        '<div style="font-size:11px;color:#6b7280">COBERTURA GLOBAL — '+res.compradores+' de '+res.universo+' clientes</div>' +
+        '<div style="font-size:11px;color:#6b7280">COBERTURA — '+res.compradores+' de '+res.universo+' clientes que compraron algo en el período'+
+          '<br><span style="color:#9ca3af">(de '+res.universoTotalRuta+' clientes totales en la ruta)</span></div>' +
       '</div>' +
       '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
         '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+res.productos+'</div>' +
