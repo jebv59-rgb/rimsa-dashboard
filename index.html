@@ -15371,17 +15371,22 @@ function renderCovPanel(){
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
       '<div>' +
         '<div style="font-size:12px;font-weight:600;color:#1A3A6B;margin-bottom:4px">Productos</div>' +
-        '<textarea id="cov-cods" placeholder="Códigos de artículo, separados por coma o espacio (ej: 1608 15383 2528)" ' +
-          'style="width:100%;min-height:46px;border:1px solid #d1d5db;border-radius:6px;padding:6px 8px;font-size:12px;box-sizing:border-box"></textarea>' +
+        '<textarea id="cov-cods" oninput="_covActualizarPreviewProductos()" placeholder="Códigos de artículo, separados por coma o espacio (ej: 1608 15383 2528)" ' +
+          'style="width:100%;min-height:36px;border:1px solid #d1d5db;border-radius:6px;padding:6px 8px;font-size:12px;box-sizing:border-box"></textarea>' +
         '<div style="display:flex;gap:8px;margin-top:6px">' +
           '<div style="flex:1">' +
             '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Línea (negocio)</div>' +
-            '<select id="cov-negocios" multiple size="5" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+negOpts+'</select>' +
+            '<select id="cov-negocios" multiple size="4" onchange="_covActualizarPreviewProductos()" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+negOpts+'</select>' +
           '</div>' +
           '<div style="flex:1">' +
             '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Rubro (segmento)</div>' +
-            '<select id="cov-segmentos" multiple size="5" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+segOpts+'</select>' +
+            '<select id="cov-segmentos" multiple size="4" onchange="_covActualizarPreviewProductos()" style="width:100%;border:1px solid #d1d5db;border-radius:6px;font-size:12px">'+segOpts+'</select>' +
           '</div>' +
+        '</div>' +
+        '<div class="muted" style="font-size:10px;color:#6b7280;margin-top:2px">Si elegís línea Y rubro juntos, se cruzan (solo cuenta lo que cumple las dos).</div>' +
+        '<div style="margin-top:8px">' +
+          '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Productos que entran en la medición</div>' +
+          '<div id="cov-productos-preview"></div>' +
         '</div>' +
       '</div>' +
       '<div>' +
@@ -15419,6 +15424,7 @@ function renderCovPanel(){
       '</div>' +
     '</div>' +
     '<div id="cov-resultado" style="margin-top:14px"></div>';
+  _covActualizarPreviewProductos();
 }
 
 // Universo de clientes con canal (extiende el patrón de _segUniversoTodos, que
@@ -15439,7 +15445,12 @@ function _covUniverso(){
   return out;
 }
 
-function _covResolverProductos(){
+// Estado de tildado del checklist de productos (se preserva entre recálculos
+// del preview, para no perder lo que el usuario destildó a mano). codigo -> bool.
+var _covCheckState = {};
+
+// Códigos manuales (siempre se incluyen, sin pasar por negocio/rubro).
+function _covCodigosManual(){
   var codigos = {};
   var raw = ((document.getElementById('cov-cods')||{}).value||'').trim();
   if(raw){
@@ -15448,19 +15459,90 @@ function _covResolverProductos(){
       if(n) codigos[n]=true;
     });
   }
+  return codigos;
+}
+
+// Códigos que matchean los filtros de línea (negocio) y rubro (segmento).
+// Si se eligen AMBOS a la vez, es intersección (tiene que cumplir los dos) —
+// no unión — para poder acotar (ej: línea "Harinas" + rubro "Sabores" da solo
+// los productos de harinas que además son sabores, no todos los de cualquiera
+// de las dos por separado.
+function _covCodigosPorNegocioSegmento(){
+  var codigos = {};
   var negSel = Array.from((document.getElementById('cov-negocios')||{}).selectedOptions||[]).map(function(o){return o.value;});
   var segSel = Array.from((document.getElementById('cov-segmentos')||{}).selectedOptions||[]).map(function(o){return o.value;});
-  if(negSel.length || segSel.length){
-    var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
-    Object.values(cat).forEach(function(p){
-      var n = p.negocio ? String(p.negocio).trim().toUpperCase() : '';
-      var s = p.segmento ? String(p.segmento).trim().toUpperCase() : '';
-      if((negSel.length && negSel.indexOf(n)>=0) || (segSel.length && segSel.indexOf(s)>=0)){
-        codigos[parseInt(p.articulo,10)]=true;
-      }
-    });
+  if(!negSel.length && !segSel.length) return codigos;
+  var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
+  Object.values(cat).forEach(function(p){
+    var n = p.negocio ? String(p.negocio).trim().toUpperCase() : '';
+    var s = p.segmento ? String(p.segmento).trim().toUpperCase() : '';
+    var matchNeg = !negSel.length || negSel.indexOf(n)>=0;
+    var matchSeg = !segSel.length || segSel.indexOf(s)>=0;
+    if(matchNeg && matchSeg) codigos[parseInt(p.articulo,10)]=true;
+  });
+  return codigos;
+}
+
+// Recalcula qué productos matchean (manual ∪ negocio/rubro) y redibuja el
+// checklist en #cov-productos-preview, dejando que el usuario destilde
+// puntualmente los que no quiere medir. covCalcular() usa lo tildado acá, no
+// el resultado crudo del filtro.
+function _covActualizarPreviewProductos(){
+  var cont = document.getElementById('cov-productos-preview');
+  if(!cont) return;
+  var manual = _covCodigosManual();
+  var porFiltro = _covCodigosPorNegocioSegmento();
+  var todos = Object.assign({}, manual, porFiltro);
+  var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
+
+  var codigosOrdenados = Object.keys(todos).map(function(c){return parseInt(c,10);}).sort(function(a,b){
+    var na = (cat[a]&&cat[a].descripcion)||('#'+a);
+    var nb = (cat[b]&&cat[b].descripcion)||('#'+b);
+    return na.localeCompare(nb,'es');
+  });
+
+  if(!codigosOrdenados.length){
+    cont.innerHTML = '<div class="muted" style="font-size:11px;color:#6b7280">Elegí códigos manuales y/o línea/rubro para ver acá qué productos entran.</div>';
+    return;
   }
-  return Object.keys(codigos).map(function(c){return parseInt(c,10);});
+
+  var filas = codigosOrdenados.map(function(cod){
+    if(!(cod in _covCheckState)) _covCheckState[cod] = true; // nuevo → tildado por defecto
+    var nombre = (cat[cod]&&cat[cod].descripcion) || ('#'+cod);
+    var checked = _covCheckState[cod] ? 'checked' : '';
+    return '<label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0;cursor:pointer">' +
+      '<input type="checkbox" data-cov-cod="'+cod+'" '+checked+' onchange="_covToggleProducto('+cod+',this.checked)"> ' +
+      '<span style="color:#374151">'+cod+' — '+nombre+'</span>' +
+    '</label>';
+  }).join('');
+
+  var nTildados = codigosOrdenados.filter(function(c){return _covCheckState[c];}).length;
+  cont.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+      '<span style="font-size:11px;color:#6b7280">'+nTildados+' de '+codigosOrdenados.length+' productos tildados</span>' +
+      '<span>' +
+        '<button type="button" onclick="_covMarcarTodos('+JSON.stringify(codigosOrdenados)+',true)" style="font-size:10px;background:none;border:none;color:#1A3A6B;cursor:pointer;text-decoration:underline">todos</button> ' +
+        '<button type="button" onclick="_covMarcarTodos('+JSON.stringify(codigosOrdenados)+',false)" style="font-size:10px;background:none;border:none;color:#1A3A6B;cursor:pointer;text-decoration:underline">ninguno</button>' +
+      '</span>' +
+    '</div>' +
+    '<div style="max-height:160px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px 8px;background:#FAFBFF">'+filas+'</div>';
+}
+
+function _covToggleProducto(cod, checked){
+  _covCheckState[cod] = checked;
+  _covActualizarPreviewProductos();
+}
+
+function _covMarcarTodos(codigos, valor){
+  codigos.forEach(function(c){ _covCheckState[c]=valor; });
+  _covActualizarPreviewProductos();
+}
+
+// Lo que realmente se mide: solo los productos tildados en el checklist.
+function _covResolverProductos(){
+  _covActualizarPreviewProductos();
+  return Object.keys(_covCheckState).filter(function(c){return _covCheckState[c];}).map(function(c){return parseInt(c,10);})
+    .filter(function(c){ return document.querySelector('[data-cov-cod="'+c+'"]'); });
 }
 
 // Arma la lista de meses (con su rango de días permitido dentro del mes) que
