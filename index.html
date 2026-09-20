@@ -1237,23 +1237,46 @@ function xlsHandleFile(file){
             periodoCov = (covMesNombre||'?')+' '+(covAnio||'');
 
             var prodRowCov = covHead[prodRowIdxCov];
-            var lastProdCodCov=null, lastProdNameCov=null;
+            // Desde que se agregó "Cantidad Venta KG" como segundo valor, cada
+            // día pasa a ocupar 2 columnas (Cantidad Venta / Cantidad Venta KG)
+            // en vez de 1, y la fila "Etiquetas de fila" pasa a tener esas
+            // etiquetas de valor en vez del día — el día se corre a la fila de
+            // arriba. Si no hay KG (formato viejo), el día sigue directo en
+            // "Etiquetas de fila" como antes.
+            var tieneKGCov = false;
+            for(var tki=1; tki<hdrCov.length; tki++){
+              if(hdrCov[tki] && /cantidad venta kg/i.test(String(hdrCov[tki]))){ tieneKGCov=true; break; }
+            }
+            var diaRowCov = tieneKGCov ? covHead[hdrRowCov-1] : null;
+
+            var lastProdCodCov=null, lastProdNameCov=null, lastDiaCov=null;
             for(var cci=1; cci<hdrCov.length; cci++){
               var pcell = prodRowCov ? prodRowCov[cci] : null;
               if(pcell!=null && String(pcell).trim()!==''){
                 var ps=String(pcell).trim();
-                if(/^total general$/i.test(ps)){ lastProdCodCov=null; lastProdNameCov=null; }
-                else{
-                  var mprod = ps.match(/\((\d+)\)\s*$/);
-                  if(mprod){ lastProdCodCov=parseInt(mprod[1],10); lastProdNameCov=ps.replace(/\s*\(\d+\)\s*$/,'').trim(); }
-                  else { lastProdCodCov=null; lastProdNameCov=null; }
-                }
+                var mprod = ps.match(/\((\d+)\)\s*$/);
+                if(mprod){ lastProdCodCov=parseInt(mprod[1],10); lastProdNameCov=ps.replace(/\s*\(\d+\)\s*$/,'').trim(); }
+                else { lastProdCodCov=null; lastProdNameCov=null; } // "Total general"/"Total Cantidad Venta..." u otro texto sin código
               }
               if(!lastProdCodCov) continue;
-              var dcell = hdrCov[cci]; if(dcell==null) continue;
-              var diaNum = parseInt(String(dcell).trim(),10);
-              if(!diaNum || diaNum<1 || diaNum>31) continue;
-              colInfoCov[cci] = {codigo:lastProdCodCov, nombre:lastProdNameCov, dia:diaNum};
+
+              if(tieneKGCov){
+                var dcellRaw = diaRowCov ? diaRowCov[cci] : null;
+                if(dcellRaw!=null && String(dcellRaw).trim()!==''){
+                  var dn = parseInt(String(dcellRaw).trim(),10);
+                  lastDiaCov = (dn>=1 && dn<=31) ? dn : null;
+                }
+                if(!lastDiaCov) continue;
+                var tipoStr = hdrCov[cci] ? String(hdrCov[cci]).trim().toLowerCase() : '';
+                var tipoCov = tipoStr==='cantidad venta kg' ? 'kg' : (tipoStr==='cantidad venta' ? 'uds' : null);
+                if(!tipoCov) continue;
+                colInfoCov[cci] = {codigo:lastProdCodCov, nombre:lastProdNameCov, dia:lastDiaCov, tipo:tipoCov};
+              } else {
+                var dcell = hdrCov[cci]; if(dcell==null) continue;
+                var diaNum = parseInt(String(dcell).trim(),10);
+                if(!diaNum || diaNum<1 || diaNum>31) continue;
+                colInfoCov[cci] = {codigo:lastProdCodCov, nombre:lastProdNameCov, dia:diaNum, tipo:'uds'};
+              }
             }
           } else {
             // Formato viejo: 1 columna = 1 producto, sin desglose por día.
@@ -1296,6 +1319,7 @@ function xlsHandleFile(file){
             plataCodSetCov[String(p.cod).padStart(10,'0')] = {nombre:p.nombre||'', vend:p.vend||''};
           });
           var plataGlobalTotalsCov = {};
+          var plataCanalTotalsCov = {}; // canal -> {codigo -> qty} (ranking de referencia por canal)
           var plataAccCov = {};
           var newProdCompras = {};
           var setVistoCov = {};    // cod10 -> {codigo:true} (evita duplicar por múltiples días)
@@ -1314,24 +1338,44 @@ function xlsHandleFile(file){
             var ci = colInfoCov[dec.c]; if(!ci) continue;
             var cellObj = wsCov[addr];
             var qtycov = (cellObj && cellObj.v!=null) ? parseFloat(cellObj.v) : 0;
-            if(!qtycov || qtycov<=0) continue;
+            // Ojo: NO descartar negativos — son Notas de Crédito (devoluciones/
+            // ajustes) y hay que netearlas contra lo vendido, si no el total del
+            // cliente queda inflado (comprobado contra "Total Cantidad Venta"
+            // de la propia hoja: sin este fix el neteo de NDC se perdía).
+            if(qtycov==null || isNaN(qtycov) || qtycov===0) continue;
 
             if(!nombresPorCodCov[ci.codigo]) nombresPorCodCov[ci.codigo]=ci.nombre;
-            if(!setVistoCov[cod10cov]) setVistoCov[cod10cov]={};
-            setVistoCov[cod10cov][ci.codigo]=true;
 
-            var esPlataCov = plataCodSetCov[cod10cov];
-            if(esPlataCov){
-              plataGlobalTotalsCov[ci.codigo] = (plataGlobalTotalsCov[ci.codigo]||0) + qtycov;
-              if(!plataAccCov[cod10cov]) plataAccCov[cod10cov] = {nombre:esPlataCov.nombre, vend:esPlataCov.vend, itemsByCod:{}};
-              plataAccCov[cod10cov].itemsByCod[ci.codigo] = (plataAccCov[cod10cov].itemsByCod[ci.codigo]||0) + qtycov;
+            // El mix de plataforma y prodCompras se arman solo con unidades
+            // (ci.tipo==='uds'); si la celda es de KG, no se cuenta acá para no
+            // mezclar dos magnitudes distintas en el mismo ranking/qty.
+            if(ci.tipo!=='kg'){
+              if(!setVistoCov[cod10cov]) setVistoCov[cod10cov]={};
+              setVistoCov[cod10cov][ci.codigo]=true;
+
+              var esPlataCov = plataCodSetCov[cod10cov];
+              if(esPlataCov){
+                plataGlobalTotalsCov[ci.codigo] = (plataGlobalTotalsCov[ci.codigo]||0) + qtycov;
+                var canalPlataCov = (window._CLIENTE_CANAL||{})[cod10cov] || (window._CLIENTE_CANAL||{})[parseInt(cod10cov,10)] || 'Sin canal';
+                if(!plataCanalTotalsCov[canalPlataCov]) plataCanalTotalsCov[canalPlataCov] = {};
+                plataCanalTotalsCov[canalPlataCov][ci.codigo] = (plataCanalTotalsCov[canalPlataCov][ci.codigo]||0) + qtycov;
+                if(!plataAccCov[cod10cov]) plataAccCov[cod10cov] = {nombre:esPlataCov.nombre, vend:esPlataCov.vend, itemsByCod:{}};
+                plataAccCov[cod10cov].itemsByCod[ci.codigo] = (plataAccCov[cod10cov].itemsByCod[ci.codigo]||0) + qtycov;
+              }
             }
 
             if(esFormatoDiarioCov && ci.dia){
               if(!covDetAcc[cod10cov]) covDetAcc[cod10cov]={};
-              if(!covDetAcc[cod10cov][ci.codigo]) covDetAcc[cod10cov][ci.codigo]={d:{},q:0};
-              covDetAcc[cod10cov][ci.codigo].d[ci.dia] = (covDetAcc[cod10cov][ci.codigo].d[ci.dia]||0) + qtycov;
-              covDetAcc[cod10cov][ci.codigo].q += qtycov;
+              if(!covDetAcc[cod10cov][ci.codigo]) covDetAcc[cod10cov][ci.codigo]={d:{},q:0,kg:0};
+              var slotCov = covDetAcc[cod10cov][ci.codigo];
+              if(!slotCov.d[ci.dia]) slotCov.d[ci.dia]={u:0,k:0};
+              if(ci.tipo==='kg'){
+                slotCov.d[ci.dia].k += qtycov;
+                slotCov.kg += qtycov;
+              } else {
+                slotCov.d[ci.dia].u += qtycov;
+                slotCov.q += qtycov;
+              }
             }
           }
           Object.keys(setVistoCov).forEach(function(cod10cov){
@@ -1346,6 +1390,16 @@ function xlsHandleFile(file){
           var plataMixRef = Object.keys(plataGlobalTotalsCov).map(function(cod){
             return {codigo:parseInt(cod,10), nombre:nombresPorCodCov[cod]||('#'+cod), qty:plataGlobalTotalsCov[cod]};
           }).sort(function(a,b){ return b.qty-a.qty; });
+          // Mismo ranking pero separado por canal (Autoservicio/Kiosco/Almacén/...),
+          // para comparar el mix de cada cliente contra lo que más se vende en SU
+          // propio canal y no contra un promedio general que no le corresponde.
+          var plataMixRefPorCanal = {};
+          Object.keys(plataCanalTotalsCov).forEach(function(canalKey){
+            var totalesCanal = plataCanalTotalsCov[canalKey];
+            plataMixRefPorCanal[canalKey] = Object.keys(totalesCanal).map(function(cod){
+              return {codigo:parseInt(cod,10), nombre:nombresPorCodCov[cod]||('#'+cod), qty:totalesCanal[cod]};
+            }).sort(function(a,b){ return b.qty-a.qty; });
+          });
           var plataMixPorCliente = {};
           Object.keys(plataAccCov).forEach(function(cod10){
             var accCli = plataAccCov[cod10];
@@ -1360,8 +1414,8 @@ function xlsHandleFile(file){
           });
           // Aparte de D (window._PLATA_MIX), sincronizado solo, para no inflar
           // rim_D y volver a pasar el cupo de localStorage.
-          window._PLATA_MIX = {ref: plataMixRef, porCliente: plataMixPorCliente};
-          log('✅ mix plataforma: '+plataMixRef.length+' artículos de referencia, '+Object.keys(plataMixPorCliente).length+' clientes con detalle',75);
+          window._PLATA_MIX = {ref: plataMixRef, refPorCanal: plataMixRefPorCanal, porCliente: plataMixPorCliente};
+          log('✅ mix plataforma: '+plataMixRef.length+' artículos de referencia ('+Object.keys(plataMixRefPorCanal).length+' canales), '+Object.keys(plataMixPorCliente).length+' clientes con detalle',75);
 
           // Historial mensual con detalle diario (para cobertura por producto +
           // rango de fechas en Clientes). Se acumula mes a mes — no se pisa lo
@@ -1766,6 +1820,7 @@ function xlsHandleFile(file){
           body: JSON.stringify({id:9, data:{
             clienteDivisiones: window._CLIENTE_DIVISIONES||{},
             plataMixRef: (window._PLATA_MIX&&window._PLATA_MIX.ref)||[],
+            plataMixRefPorCanal: (window._PLATA_MIX&&window._PLATA_MIX.refPorCanal)||{},
             plataMixPorCliente: (window._PLATA_MIX&&window._PLATA_MIX.porCliente)||{},
             clienteCanal: window._CLIENTE_CANAL||{}
           }})
@@ -10996,7 +11051,7 @@ try{(async function(){
     if(rows && rows.length && rows[0].data){
       var d9 = rows[0].data;
       window._CLIENTE_DIVISIONES = d9.clienteDivisiones||{};
-      window._PLATA_MIX = {ref: d9.plataMixRef||[], porCliente: d9.plataMixPorCliente||{}};
+      window._PLATA_MIX = {ref: d9.plataMixRef||[], refPorCanal: d9.plataMixRefPorCanal||{}, porCliente: d9.plataMixPorCliente||{}};
       window._CLIENTE_CANAL = d9.clienteCanal||{};
       if (typeof _cuCache !== 'undefined') _cuCache = null;
     }
@@ -11025,7 +11080,23 @@ try{supaCargarCatalogo().then(function(prods){
     var lc=JSON.parse(localStorage.getItem('rim_catalogo')||'[]');
     prods.forEach(function(p){
       var i=lc.findIndex(function(x){return String(x.codigo)===String(p.codigo);});
-      if(i>=0) lc[i]=p; else lc.push(p);
+      if(i>=0){
+        // Fusión defensiva: un campo vacío que venga de Supabase (por ejemplo
+        // una copia vieja/duplicada sin foto — ver limpieza de rimsa_catalogo)
+        // NUNCA pisa un campo que localmente ya tenía datos. Así una foto que
+        // ya está guardada en este navegador no se puede perder por una fila
+        // vieja del servidor.
+        var local = lc[i];
+        var merged = Object.assign({}, local);
+        Object.keys(p).forEach(function(k){
+          var v = p[k];
+          var vacio = (v===null || v==='' || v===0 || (Array.isArray(v)&&!v.length));
+          if(!vacio || !(k in merged) || merged[k]===null || merged[k]==='' ) merged[k] = v;
+        });
+        lc[i] = merged;
+      } else {
+        lc.push(p);
+      }
       // Si es producto manual, agregarlo a todas las listas
       if(p._manual && p.precioLista>0){
         var prodLista={articulo:parseInt(p.codigo),descripcion:(p.nombre||'').toUpperCase(),
@@ -11528,9 +11599,13 @@ function getCatProd(art) {
   const custom = catalogo.find(function(p){
     return p.codigo === artN || p.codigo === artS || parseInt(p.codigo) === artN;
   });
-  if (custom) return custom;
-  // Buscar en catálogo base oficial Arcor
   const base = CATALOGO_BASE[artS] || CATALOGO_BASE[String(artN)];
+  if (custom) {
+    // Si el producto personalizado no tiene foto propia pero el catálogo base
+    // oficial Arcor sí, usar esa como respaldo en vez de mostrarlo sin imagen.
+    if (!custom.imagen && base && base.imagen) return Object.assign({}, custom, {imagen: base.imagen});
+    return custom;
+  }
   if (base) return base;
   return null;
 }
@@ -11927,7 +12002,8 @@ function guardarProdCat() {
   };
   if (editId) { const i = catalogo.findIndex(p=>p.id===parseInt(editId)); if(i>=0) catalogo[i]=prod; }
   else catalogo.push(prod);
-  localStorage.setItem('rim_catalogo', JSON.stringify(catalogo));
+  try { localStorage.setItem('rim_catalogo', JSON.stringify(catalogo)); } catch(e) { console.warn('rim_catalogo: cupo local lleno', e.message); }
+  if (typeof supaGuardarCatalogoProd === 'function') supaGuardarCatalogoProd(prod);
   limpiarFormProd();
   toast('✅ Producto guardado', 'ok');
 }
@@ -11972,7 +12048,7 @@ function editarCatProd(id) {
 function borrarCatProd(id) {
   if (!confirm('¿Eliminar este producto del catálogo?')) return;
   catalogo = catalogo.filter(p=>p.id!==id);
-  localStorage.setItem('rim_catalogo', JSON.stringify(catalogo));
+  try { localStorage.setItem('rim_catalogo', JSON.stringify(catalogo)); } catch(e) { console.warn('rim_catalogo: cupo local lleno', e.message); }
   toast('🗑 Eliminado', 'ok');
 }
 
@@ -12122,44 +12198,88 @@ function mlogCalc() {
   }
 }
 function guardarModalLog() {
-  const codigo = parseInt(document.getElementById('mlog-codigo').value);
-  if (!codigo) return;
-  const imgData = document.getElementById('mlog-img-data').value.trim();
-  const imgUrl  = document.getElementById('mlog-img-url').value.trim();
-  const base  = CATALOGO_BASE[String(codigo)] || {};
-  const existing = catalogo.findIndex(p => parseInt(p.codigo) === codigo);
-  const prod = {
-    id: existing >= 0 ? catalogo[existing].id : Date.now(),
-    codigo,
-    nombre:       base.nombre || '',
-    categoria:    base.categoria || '',
-    presentacion: document.getElementById('mlog-bulto').value.trim() || base.presentacion || '',
-    bultoDesc:    document.getElementById('mlog-bulto').value.trim() || base.presentacion || '',
-    ean13:        document.getElementById('mlog-ean13').value.trim() || base.ean13 || '',
-    ean8:         document.getElementById('mlog-ean8').value.trim()  || base.ean8  || '',
-    dun14:        document.getElementById('mlog-dun14').value.trim() || base.dun14 || '',
-    bultosBase:   parseFloat(document.getElementById('mlog-base').value)   || base.bultosBase   || 0,
-    bultosPallet: parseFloat(document.getElementById('mlog-pallet').value) || base.bultosPallet || 0,
-    imagen:       imgData || imgUrl || (existing >= 0 ? catalogo[existing].imagen : '') || base.imagen || '',
-    tag:          document.getElementById('mlog-tag').value,
-    novedades:    document.getElementById('mlog-novedades').value.trim(),
-  };
-  if (existing >= 0) catalogo[existing] = prod; else catalogo.push(prod);
-  localStorage.setItem('rim_catalogo', JSON.stringify(catalogo));
-  supaGuardarCatalogoProd(prod);
-  document.getElementById('modal-log').classList.remove('open');
-  renderTabla();
-  toast('✅ Datos logísticos guardados', 'ok');
+  try {
+    const codigo = parseInt(document.getElementById('mlog-codigo').value);
+    if (!codigo) return;
+    const imgData = document.getElementById('mlog-img-data').value.trim();
+    const imgUrl  = document.getElementById('mlog-img-url').value.trim();
+    const base  = CATALOGO_BASE[String(codigo)] || {};
+    const existing = catalogo.findIndex(p => parseInt(p.codigo) === codigo);
+    const prod = {
+      id: existing >= 0 ? catalogo[existing].id : Date.now(),
+      codigo,
+      nombre:       base.nombre || '',
+      categoria:    base.categoria || '',
+      presentacion: document.getElementById('mlog-bulto').value.trim() || base.presentacion || '',
+      bultoDesc:    document.getElementById('mlog-bulto').value.trim() || base.presentacion || '',
+      ean13:        document.getElementById('mlog-ean13').value.trim() || base.ean13 || '',
+      ean8:         document.getElementById('mlog-ean8').value.trim()  || base.ean8  || '',
+      dun14:        document.getElementById('mlog-dun14').value.trim() || base.dun14 || '',
+      bultosBase:   parseFloat(document.getElementById('mlog-base').value)   || base.bultosBase   || 0,
+      bultosPallet: parseFloat(document.getElementById('mlog-pallet').value) || base.bultosPallet || 0,
+      imagen:       imgData || imgUrl || (existing >= 0 ? catalogo[existing].imagen : '') || base.imagen || '',
+      tag:          document.getElementById('mlog-tag').value,
+      novedades:    document.getElementById('mlog-novedades').value.trim(),
+    };
+    if (existing >= 0) catalogo[existing] = prod; else catalogo.push(prod);
+    // El localStorage local tiene un cupo chico (~5-10MB) y con muchas fotos
+    // guardadas se puede llenar — si eso pasa, NO tiene que frenar el resto del
+    // guardado (antes s picó acá y el botón "Guardar" quedaba sin hacer nada).
+    // Lo que manda es Supabase; el navegador se resincroniza solo en la próxima carga.
+    var guardadoLocalOk = true;
+    try {
+      localStorage.setItem('rim_catalogo', JSON.stringify(catalogo));
+    } catch(exStorage) {
+      guardadoLocalOk = false;
+      console.warn('rim_catalogo: no entró en localStorage (cupo lleno), se sigue guardando igual en el servidor.', exStorage.message);
+    }
+    supaGuardarCatalogoProd(prod);
+    document.getElementById('modal-log').classList.remove('open');
+    renderTabla();
+    toast(guardadoLocalOk ? '✅ Datos logísticos guardados' : '✅ Guardado en el servidor (memoria local llena, no afecta el guardado)', 'ok');
+  } catch(exGuardar) {
+    console.error('guardarModalLog:', exGuardar);
+    toast('❌ No se pudo guardar: ' + exGuardar.message, 'error');
+  }
 }
-function mlogDragOver(e) { e.preventDefault(); document.getElementById('mlog-dropzone').style.borderColor='var(--lp-gold)'; document.getElementById('mlog-dropzone').style.background='#FFFBEA'; }
-function mlogDragLeave()  { document.getElementById('mlog-dropzone').style.borderColor='var(--lp-blue-light)'; document.getElementById('mlog-dropzone').style.background='var(--lp-blue-pale)'; }
+
+function mlogDragOver(e) { e.preventDefault(); var dz=document.getElementById('mlog-drop-zone'); if(dz){dz.style.borderColor='var(--lp-gold)'; dz.style.background='#FFFBEA';} }
+function mlogDragLeave()  { var dz=document.getElementById('mlog-drop-zone'); if(dz){dz.style.borderColor='var(--lp-blue-light)'; dz.style.background='var(--lp-blue-pale)';} }
 function mlogDrop(e) { e.preventDefault(); mlogDragLeave(); const file=e.dataTransfer.files[0]; if(file&&file.type.startsWith('image/')) mlogProcesarImg(file); }
 function mlogFileChange(e) { const f=e.target.files[0]; if(f) mlogProcesarImg(f); }
 function mlogProcesarImg(file) {
-  if(file.size>5*1024*1024){toast('⚠️ Imagen mayor a 5MB','error');return;}
-  const r=new FileReader();
-  r.onload=e=>{document.getElementById('mlog-img-data').value=e.target.result;document.getElementById('mlog-img-url').value='';mlogMostrarPreview(e.target.result);};
-  r.readAsDataURL(file);
+  if(!file || !file.type || !file.type.startsWith('image/')){ toast('⚠️ El archivo tiene que ser una imagen', 'error'); return; }
+  var maxMB = 20;
+  if(file.size > maxMB*1024*1024){ toast('⚠️ Imagen mayor a '+maxMB+'MB, elegí una más liviana', 'error'); return; }
+  // Las fotos de celular pueden pesar varios MB — se redimensionan y comprimen
+  // acá mismo (canvas) antes de guardarlas, así entran sin problema en la base
+  // y no se repite el problema de filas gigantes/duplicadas en Supabase.
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var img = new Image();
+    img.onload = function(){
+      var MAXDIM = 900;
+      var w = img.width, h = img.height;
+      if (w > MAXDIM || h > MAXDIM) {
+        if (w >= h) { h = Math.round(h * MAXDIM / w); w = MAXDIM; }
+        else { w = Math.round(w * MAXDIM / h); h = MAXDIM; }
+      }
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      var dataUrl;
+      try { dataUrl = canvas.toDataURL('image/jpeg', 0.82); }
+      catch(err) { toast('⚠️ No se pudo procesar la imagen', 'error'); return; }
+      document.getElementById('mlog-img-data').value = dataUrl;
+      document.getElementById('mlog-img-url').value = '';
+      mlogMostrarPreview(dataUrl);
+    };
+    img.onerror = function(){ toast('⚠️ No se pudo procesar la imagen', 'error'); };
+    img.src = e.target.result;
+  };
+  reader.onerror = function(){ toast('⚠️ No se pudo leer el archivo', 'error'); };
+  reader.readAsDataURL(file);
 }
 function mlogUrlChange(url){if(url){document.getElementById('mlog-img-data').value='';mlogMostrarPreview(url);}}
 function mlogMostrarPreview(src){
@@ -15416,6 +15536,13 @@ function renderCovPanel(){
             '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Cantidad mínima (surtida entre los productos elegidos)</div>' +
             '<input id="cov-minimo" type="number" min="1" step="1" value="1" style="width:80px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:6px">' +
           '</div>' +
+          '<div>' +
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:2px">Medido en</div>' +
+            '<select id="cov-unidad-minimo" style="border:1px solid #d1d5db;border-radius:6px;font-size:12px;padding:6px">'+
+              '<option value="uds">Unidades</option>'+
+              '<option value="kg">KG</option>'+
+            '</select>' +
+          '</div>' +
           '<button onclick="covCalcular()" style="align-self:flex-end;background:#1A3A6B;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer">Calcular cobertura</button>' +
         '</div>' +
         '<div class="muted" style="font-size:11px;margin-top:4px;color:#6b7280">'+
@@ -15568,8 +15695,11 @@ function _covResolverRango(mesDesde, diaDesde, mesHasta, diaHasta){
 // dentro del rango de fechas. covCalcular() compara esta suma contra el mínimo
 // que haya puesto el usuario (por defecto 1 = "compró algo, lo que sea").
 function _covCantidadClienteEnRango(cod10, codigosSet, rango){
+  // Devuelve {uds, kg} sumando lo comprado de los productos elegidos en el
+  // rango de fechas. Compatible con meses viejos ya sincronizados en Supabase
+  // donde cada día era un número plano (solo unidades, sin KG).
   var hist = window._COV_HIST||{};
-  var total = 0;
+  var uds = 0, kg = 0;
   for(var ri=0; ri<rango.length; ri++){
     var r = rango[ri];
     var mes = hist[r.mesKey];
@@ -15584,11 +15714,18 @@ function _covCantidadClienteEnRango(cod10, codigosSet, rango){
       var diasKeys = Object.keys(dias);
       for(var di=0; di<diasKeys.length; di++){
         var dNum = parseInt(diasKeys[di],10);
-        if(dNum>=r.diaMin && dNum<=r.diaMax) total += dias[diasKeys[di]];
+        if(dNum<r.diaMin || dNum>r.diaMax) continue;
+        var dv = dias[diasKeys[di]];
+        if(dv && typeof dv==='object'){
+          uds += dv.u||0;
+          kg += dv.k||0;
+        } else {
+          uds += dv||0; // formato viejo (solo unidades)
+        }
       }
     }
   }
-  return total;
+  return {uds:uds, kg:kg};
 }
 
 // Si el cliente compró CUALQUIER producto (no solo los elegidos para medir)
@@ -15626,6 +15763,7 @@ function covCalcular(){
   var codigosSet = {}; codigosArr.forEach(function(c){codigosSet[c]=true;});
   var minimoCant = parseFloat((document.getElementById('cov-minimo')||{}).value);
   if(!minimoCant || minimoCant<0) minimoCant = 1;
+  var unidadMinimo = (document.getElementById('cov-unidad-minimo')||{}).value === 'kg' ? 'kg' : 'uds';
 
   var mesDesde = (document.getElementById('cov-mes-desde')||{}).value;
   var mesHasta = (document.getElementById('cov-mes-hasta')||{}).value;
@@ -15647,13 +15785,15 @@ function covCalcular(){
   var universoBase = _covUniverso();
   var porVend = {}, porCanal = {};
   var noCompPorVend = {}; // vendCod -> [{cod,nombre}] — para el envío por WhatsApp
-  var compGlob = 0, universoCount = 0;
+  var compGlob = 0, universoCount = 0, kgTotalGlobal = 0;
   universoBase.forEach(function(cli){
     var cod10 = String(cli.cod).padStart(10,'0');
     if(!_covActivoEnRango(cod10, rango)) return; // no compró nada en el rango: no entra en el universo
     universoCount++;
-    var cantidad = _covCantidadClienteEnRango(cod10, codigosSet, rango);
+    var cant = _covCantidadClienteEnRango(cod10, codigosSet, rango);
+    var cantidad = unidadMinimo==='kg' ? cant.kg : cant.uds;
     var compro = cantidad >= minimoCant;
+    kgTotalGlobal += cant.kg||0;
     if(!porVend[cli.vend_cod]) porVend[cli.vend_cod]={universo:0,compradores:0};
     porVend[cli.vend_cod].universo++;
     var canalN = cli.canal || 'Sin canal';
@@ -15665,7 +15805,7 @@ function covCalcular(){
       porCanal[canalN].compradores++;
     } else {
       if(!noCompPorVend[cli.vend_cod]) noCompPorVend[cli.vend_cod]=[];
-      noCompPorVend[cli.vend_cod].push({cod:cli.cod, nombre:cli.nombre||('#'+cli.cod), cantidad:cantidad});
+      noCompPorVend[cli.vend_cod].push({cod:cli.cod, nombre:cli.nombre||('#'+cli.cod), cantidad:cantidad, uds:cant.uds, kg:cant.kg});
     }
   });
   Object.keys(noCompPorVend).forEach(function(v){
@@ -15677,6 +15817,7 @@ function covCalcular(){
     pct: universoCount ? Math.round(compGlob/universoCount*1000)/10 : 0,
     porVendedor: porVend, porCanal: porCanal, noCompPorVend: noCompPorVend,
     productos: codigosArr.length, productosCods: codigosArr, rango: rango, minimo: minimoCant,
+    unidadMinimo: unidadMinimo, kgTotal: Math.round(kgTotalGlobal*10)/10,
     universoTotalRuta: universoBase.length
   };
   _covRenderResultado(_covUltimoResultado);
@@ -15728,8 +15869,12 @@ function _covRenderResultado(res){
         '<div style="font-size:11px;color:#6b7280">PRODUCTOS INCLUIDOS EN EL CÁLCULO</div>' +
       '</div>' +
       '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
-        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">≥ '+res.minimo+'</div>' +
-        '<div style="font-size:11px;color:#6b7280">UNIDADES MÍNIMAS (SURTIDAS) PARA CONTAR COMO CUBIERTO</div>' +
+        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">≥ '+res.minimo+' '+(res.unidadMinimo==='kg'?'KG':'uds.')+'</div>' +
+        '<div style="font-size:11px;color:#6b7280">MÍNIMO '+(res.unidadMinimo==='kg'?'EN KG':'EN UNIDADES')+' (SURTIDO) PARA CONTAR COMO CUBIERTO</div>' +
+      '</div>' +
+      '<div style="background:#FAFBFF;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px">' +
+        '<div style="font-size:22px;font-weight:700;color:#1A3A6B">'+(res.kgTotal||0).toLocaleString('es-AR')+'</div>' +
+        '<div style="font-size:11px;color:#6b7280">KG TOTALES VENDIDOS DE ESTOS PRODUCTOS EN EL PERÍODO</div>' +
       '</div>' +
     '</div>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
@@ -15766,12 +15911,13 @@ function enviarCovNoCompradoresWA(vendCod){
   (D.vendors||[]).forEach(function(v){ vendNombres[v.cod]=v.nombre; });
   var info = _covDescripcionProductosPeriodo(res);
 
+  var unidadTxt = res.unidadMinimo==='kg' ? 'KG' : 'unidades';
   var texto = '*RIMSA — No compradores · '+vendCod+' — '+(vendNombres[vendCod]||'')+'*\n';
   if(info.listaProd) texto += '_Productos: '+info.listaProd+'_\n';
   if(info.periodoTxt) texto += '_Período: '+info.periodoTxt+'_\n';
-  texto += '_Mínimo para contar como cubierto: '+res.minimo+' unidades (surtidas)_\n\n';
+  texto += '_Mínimo para contar como cubierto: '+res.minimo+' '+unidadTxt+' (surtidas)_\n\n';
   lista.forEach(function(c){
-    texto += '• '+c.nombre+(c.cantidad>0?' (llevaba '+c.cantidad+')':'')+'\n';
+    texto += '• '+c.nombre+(c.cantidad>0?' (llevaba '+c.cantidad+' '+unidadTxt+')':'')+'\n';
   });
   texto += '\n_Total: '+lista.length+' sin cubrir_';
 
@@ -15787,10 +15933,18 @@ function enviarCovNoCompradoresWA(vendCod){
 // plataforma, según D.plataMixRef, recortado a un tope — por defecto 250).
 function _cuMixPlataforma(cod, topN){
   var pm = window._PLATA_MIX || {};
-  var ref = pm.ref || [];
+  var cod10 = String(cod).padStart(10,'0');
+  // El ranking de referencia (top-N más vendido) se toma del canal del propio
+  // cliente (Autoservicio/Kiosco/Almacén/...) — no tiene sentido comparar el
+  // surtido de un kiosco contra el de un autoservicio. Si el cliente no tiene
+  // canal asignado o ese canal no tiene ranking propio, se cae al global.
+  var canalMap = window._CLIENTE_CANAL || {};
+  var canal = canalMap[cod10] || canalMap[cod] || canalMap[parseInt(cod,10)] || null;
+  var refPorCanal = pm.refPorCanal || {};
+  var usoCanalEspecifico = !!(canal && refPorCanal[canal] && refPorCanal[canal].length);
+  var ref = usoCanalEspecifico ? refPorCanal[canal] : (pm.ref || []);
   if (!ref.length) return null;
   topN = topN || 250;
-  var cod10 = String(cod).padStart(10,'0');
   var det = (pm.porCliente||{})[cod10];
   var N = Math.min(topN, ref.length);
   var refTop = ref.slice(0, N);
@@ -15799,7 +15953,8 @@ function _cuMixPlataforma(cod, topN){
   var faltantes = refTop.filter(function(r){ return !compradosMap[r.codigo]; });
   var mixCount = N - faltantes.length;
   var topCliente = (det&&det.items||[]).slice(0,10);
-  return {mixCount:mixCount, refN:N, refTop:refTop, faltantes:faltantes, topCliente:topCliente, compradosMap:compradosMap, nombre: det&&det.nombre};
+  return {mixCount:mixCount, refN:N, refTop:refTop, faltantes:faltantes, topCliente:topCliente, compradosMap:compradosMap, nombre: det&&det.nombre,
+    canal: canal || 'Sin canal', canalRankingUsado: usoCanalEspecifico};
 }
 
 function _cuRenderPagina() {
@@ -16026,7 +16181,7 @@ function abrirModalMixPlataforma(cod){
     '<div style="background:#fff;border-radius:14px;width:100%;max-width:760px;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:\'DM Sans\',sans-serif;margin:auto">'
     + '<div style="background:linear-gradient(135deg,#001F58,#003DA5);color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0">'
     +   '<div><div style="font-family:\'Syne\',sans-serif;font-weight:800;font-size:14px">🧺 Mix de productos</div>'
-    +   '<div style="font-size:11px;opacity:.85">'+escapeHtmlSeg(nombreCli)+' · '+mix.mixCount+' / '+mix.refN+' ítems</div></div>'
+    +   '<div style="font-size:11px;opacity:.85">'+escapeHtmlSeg(nombreCli)+' · '+mix.mixCount+' / '+mix.refN+' ítems · canal: '+escapeHtmlSeg(mix.canal)+(mix.canalRankingUsado?'':' (sin ranking propio, se usó el general)')+'</div></div>'
     +   '<button onclick="cerrarModalMat(\'mix-plataforma-modal\')" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px">✕</button>'
     + '</div>'
     + '<div style="padding:14px 18px;display:flex;gap:14px;flex-wrap:wrap">'
@@ -16046,19 +16201,46 @@ function abrirModalMixPlataforma(cod){
   modal.style.display = 'flex';
 }
 
+// Agrupa una lista de items {codigo,...} por segmento (rubro) según el catálogo
+// de productos (_segCatalogoProductos). Si un código no está en el catálogo,
+// va a un grupo aparte "Sin segmento" en vez de perderse.
+function _mixAgruparPorSegmento(items){
+  var cat = (typeof _segCatalogoProductos==='function') ? _segCatalogoProductos() : {};
+  var grupos = {};
+  items.forEach(function(it){
+    var p = cat[it.codigo];
+    var seg = (p && p.segmento && String(p.segmento).trim()) || 'Sin segmento';
+    if(!grupos[seg]) grupos[seg]=[];
+    grupos[seg].push(it);
+  });
+  return grupos;
+}
+
 function enviarMixPlataformaWA(cod){
   var mix = _cuMixPlataforma(cod);
   if (!mix) { mostrarToast('No hay datos de mix de plataforma para este cliente.'); return; }
   var cliCache = (_cuCache||[]).find(function(c){ return c.cod===cod; });
   var nombreCli = (cliCache&&cliCache.nombre) || mix.nombre || cod;
 
+  // Solo se manda lo que LE FALTA — lo que ya compró no aporta nada nuevo al
+  // vendedor y hacía el mensaje larguísimo.
+  var faltantesList = mix.faltantes.map(function(r){ return {codigo:r.codigo, nombre:r.nombre}; });
+  var gruposFaltantes = _mixAgruparPorSegmento(faltantesList);
+  var segmentosOrdenados = Object.keys(gruposFaltantes).sort(function(a,b){ return a.localeCompare(b,'es'); });
+
   var texto = '*RIMSA — Mix de productos · '+nombreCli+'*\n';
-  texto += '_Cobertura: '+mix.mixCount+' / '+mix.refN+' ítems_\n\n';
-  texto += '*Más vendidos:*\n';
-  mix.topCliente.slice(0,10).forEach(function(it){ texto += '• '+it.nombre+' ('+Math.round(it.qty)+')\n'; });
-  texto += '\n*Le faltan ('+mix.faltantes.length+'):*\n';
-  mix.faltantes.slice(0,30).forEach(function(it){ texto += '• '+it.nombre+'\n'; });
-  if (mix.faltantes.length>30) texto += '… y '+(mix.faltantes.length-30)+' más\n';
+  texto += '_Canal: '+mix.canal+(mix.canalRankingUsado?'':' (sin ranking propio, se usó el general)')+'_\n';
+  texto += '_Cobertura: '+mix.mixCount+' / '+mix.refN+' ítems_\n';
+  texto += '_Le falta ('+faltantesList.length+'), agrupado por segmento_\n';
+
+  segmentosOrdenados.forEach(function(seg){
+    var items = gruposFaltantes[seg];
+    if(!items || !items.length) return;
+    items.sort(function(a,b){ return (a.nombre||'').localeCompare(b.nombre||'','es'); });
+    texto += '\n_'+seg+'_\n';
+    items.forEach(function(it){ texto += '• '+it.nombre+' ('+it.codigo+')\n'; });
+  });
+
   texto += '\n_RIMSA · '+new Date().toLocaleDateString('es-AR')+'_';
 
   if (navigator.share) {
