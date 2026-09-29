@@ -930,16 +930,23 @@ function xlsHandleFile(file){
           '0060','0061','0063','0064','0065','0078','0111','0113','0201'];
 
         // Construir mapa cod→{kg26_choc,kg26_gol,kg25,segs26,segs25} desde ventas mobiliarios
+        // + en paralelo, mapa cod→{saladix,ganchera_masti,ganchera_mogul}{venta25,venta26,kg25,kg26}
+        // para calcular EN VIVO (no frizado) la compra real de cada exhibidor/gancho,
+        // por sub-rubro: 0133=SNACKS DE COPETIN (saladix, incluye papas fritas reales),
+        // 0002=MASTICABLES (masti), 0005=CARAMELOS DE GOMA (mogul).
         var kgBnd={};
-        var curCodBnd=null, curSegBnd=null;
+        var MATX_SUB={'0133':'saladix','0002':'ganchera_masti','0005':'ganchera_mogul'};
+        var kgMatX={};
+        var curCodBnd=null, curSegBnd=null, curSegX=null;
         for(var rbi=4;rbi<kgaa.length;rbi++){
           var rbrow=kgaa[rbi]; if(!rbrow||!rbrow[0]) continue;
           var rbs=String(rbrow[0]).trim();
           var rmc=rbs.match(/\((\d{7,12})\)/);
           if(rmc&&rbs.indexOf('(')>=0){
             curCodBnd=rmc[1].padStart(10,'0');
-            curSegBnd=null;
+            curSegBnd=null; curSegX=null;
             if(!kgBnd[curCodBnd]) kgBnd[curCodBnd]={kg26_choc:0,kg26_gol:0,kg25:0,segs26:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],segs25:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]};
+            if(!kgMatX[curCodBnd]) kgMatX[curCodBnd]={saladix:{venta25:0,venta26:0,kg25:0,kg26:0},ganchera_masti:{venta25:0,venta26:0,kg25:0,kg26:0},ganchera_mogul:{venta25:0,venta26:0,kg25:0,kg26:0}};
             continue;
           }
           if(!curCodBnd) continue;
@@ -947,6 +954,7 @@ function xlsHandleFile(file){
           var rsm=rbs.match(/^(\d{4})\s*-/);
           if(rsm){
             curSegBnd = SEGS_BND.indexOf(rsm[1])>=0 ? rsm[1] : null;
+            curSegX = MATX_SUB[rsm[1]] ? rsm[1] : null;
             continue;
           }
           // Fila de 2 dígitos: división real (reinicia contexto) o línea con los datos reales
@@ -955,20 +963,31 @@ function xlsHandleFile(file){
           if(r2bnd){
             var nomTrasBnd=(r2bnd[2]||'').trim().toUpperCase();
             if(DIVISION_NAMES[nomTrasBnd]){
-              curSegBnd=null;
+              curSegBnd=null; curSegX=null;
               continue;
             }
-            if(!curSegBnd) continue;
-            var ridx=SEGS_BND.indexOf(curSegBnd);
-            if(ridx<0) continue;
+            if(!curSegBnd && !curSegX) continue;
             var rv26=parseFloat(rbrow[C26])||0;
             var rv25=parseFloat(rbrow[C25])||0;
-            var rrub=RUBRO_SEG[curSegBnd]||'';
-            kgBnd[curCodBnd].segs26[ridx]+=rv26;
-            kgBnd[curCodBnd].segs25[ridx]+=rv25;
-            kgBnd[curCodBnd].kg25+=rv25;
-            if(rrub==='choc'||rrub==='both') kgBnd[curCodBnd].kg26_choc+=rv26;
-            if(rrub==='gol' ||rrub==='both') kgBnd[curCodBnd].kg26_gol+=rv26;
+            if(curSegBnd){
+              var ridx=SEGS_BND.indexOf(curSegBnd);
+              if(ridx>=0){
+                var rrub=RUBRO_SEG[curSegBnd]||'';
+                kgBnd[curCodBnd].segs26[ridx]+=rv26;
+                kgBnd[curCodBnd].segs25[ridx]+=rv25;
+                kgBnd[curCodBnd].kg25+=rv25;
+                if(rrub==='choc'||rrub==='both') kgBnd[curCodBnd].kg26_choc+=rv26;
+                if(rrub==='gol' ||rrub==='both') kgBnd[curCodBnd].kg26_gol+=rv26;
+              }
+            }
+            if(curSegX){
+              var destCatX=MATX_SUB[curSegX];
+              var rvv26=parseFloat(rbrow[C26-1])||0;
+              var rvv25=parseFloat(rbrow[C25-1])||0;
+              if(!kgMatX[curCodBnd]) kgMatX[curCodBnd]={saladix:{venta25:0,venta26:0,kg25:0,kg26:0},ganchera_masti:{venta25:0,venta26:0,kg25:0,kg26:0},ganchera_mogul:{venta25:0,venta26:0,kg25:0,kg26:0}};
+              var accX=kgMatX[curCodBnd][destCatX];
+              accX.kg26+=rv26; accX.kg25+=rv25; accX.venta26+=rvv26; accX.venta25+=rvv25;
+            }
           }
         }
 
@@ -1034,9 +1053,10 @@ function xlsHandleFile(file){
           var totalSinBnd=Object.values(newSinBnd).reduce(function(s,l){return s+l.length;},0);
           log('✅ bandeja: '+newBndClients.length+' clientes según MATERIALES'+(eliminadosBnd?' · '+eliminadosBnd+' ya no figuran (retirados)':'')+' · '+totalSinBnd+' sin compra',67);
 
-          // SALADIX / MASTI / MOGUL — misma lógica de membresía real desde MATERIALES.
-          // KG/venta se conservan de la carga anterior para los que ya estaban;
-          // los que recién aparecen entran con 0 y quedan marcados para revisar.
+          // SALADIX / MASTI / MOGUL — membresía real desde MATERIALES (quién tiene el
+          // exhibidor/gancho instalado), y KG/venta calculados EN VIVO en cada carga desde
+          // "ventas mobiliarios" (kgMatX, sub-rubros 0133/0002/0005), no congelados de la
+          // carga anterior — así una compra nueva del período se refleja al toque.
           [['exhibidora_saladix','saladix'],['ganchera_masti','ganchera_masti'],['ganchera_mogul','ganchera_mogul']].forEach(function(pair){
             var mtipo=pair[0], destKey=pair[1];
             if(!newD.materiales) newD.materiales={};
@@ -1046,10 +1066,18 @@ function xlsHandleFile(file){
             var nuevosArr=[];
             Object.keys(matMembership[mtipo]).forEach(function(cod){
               var old2=oldByCod2[cod];
-              if(old2){ nuevosArr.push(old2); }
-              else {
-                nuevosArr.push({cod:cod, nombre:matNombres[cod]||cod, kg25:0, kg26:0, venta25:0, venta26:0, alerta:true});
-              }
+              var mx=(kgMatX[cod]||{})[destKey]||{kg25:0,kg26:0,venta25:0,venta26:0};
+              var kg25v=Math.round(mx.kg25*1000)/1000;
+              var kg26v=Math.round(mx.kg26*1000)/1000;
+              var venta25v=Math.round(mx.venta25*100)/100;
+              var venta26v=Math.round(mx.venta26*100)/100;
+              var alertaV=(kg26v===0)||(kg25v>0&&kg26v<kg25v);
+              nuevosArr.push({
+                cod:cod,
+                nombre:(old2&&old2.nombre)||matNombres[cod]||cod,
+                kg25:kg25v, kg26:kg26v, venta25:venta25v, venta26:venta26v,
+                alerta:alertaV
+              });
             });
             var eliminadosM=Object.keys(oldByCod2).filter(function(c){return !matMembership[mtipo][c];}).length;
             newD.materiales[destKey]=nuevosArr;
