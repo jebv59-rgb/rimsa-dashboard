@@ -46,14 +46,26 @@
     };
     console.log('[RIMSA] generarBarcodeSVG parchado con JsBarcode');
   }
+  function _rimPatchFichaUnica() {
+    // Ensure #mod-listas is visible when the modal opens (it may be display:none on other tabs)
+    var orig = window.fichaUnica;
+    if (typeof orig !== 'function') return;
+    window.fichaUnica = function(cod) {
+      var modListas = document.getElementById('mod-listas');
+      if (modListas) modListas.style.display = 'block';
+      return orig.apply(this, arguments);
+    };
+    console.log('[RIMSA] fichaUnica parchado para mostrar mod-listas');
+  }
   function _rimLoadJsBarcode() {
     if (window.JsBarcode) {
       _rimPatchGenerarBarcode();
+      _rimPatchFichaUnica();
       return;
     }
     var s = document.createElement('script');
     s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js';
-    s.onload = _rimPatchGenerarBarcode;
+    s.onload = function() { _rimPatchGenerarBarcode(); _rimPatchFichaUnica(); };
     s.onerror = function() { console.warn('[RIMSA] JsBarcode no disponible'); };
     document.head.appendChild(s);
   }
