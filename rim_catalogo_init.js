@@ -21,3 +21,45 @@
     console.log('[RIMSA] Catálogo inicializado: '+newData.length+' entradas');
   }
 })();
+// Parche de barcodes - carga JsBarcode y reemplaza generarBarcodeSVG
+(function(){
+  function _rimPatchGenerarBarcode() {
+    window.generarBarcodeSVG = function(ean, tipo) {
+      if (!ean || !window.JsBarcode) return '';
+      try {
+        var format = tipo === 'EAN8' ? 'EAN8' : 'EAN13';
+        var svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        JsBarcode(svgEl, String(ean), {
+          format: format,
+          displayValue: true,
+          fontSize: 11,
+          height: 50,
+          width: 1.5,
+          margin: 4,
+          lineColor: '#000000',
+          background: '#ffffff'
+        });
+        return new XMLSerializer().serializeToString(svgEl);
+      } catch(e) {
+        return '';
+      }
+    };
+    console.log('[RIMSA] generarBarcodeSVG parchado con JsBarcode');
+  }
+  function _rimLoadJsBarcode() {
+    if (window.JsBarcode) {
+      _rimPatchGenerarBarcode();
+      return;
+    }
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js';
+    s.onload = _rimPatchGenerarBarcode;
+    s.onerror = function() { console.warn('[RIMSA] JsBarcode no disponible'); };
+    document.head.appendChild(s);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _rimLoadJsBarcode);
+  } else {
+    _rimLoadJsBarcode();
+  }
+})();
