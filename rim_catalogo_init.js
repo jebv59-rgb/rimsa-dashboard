@@ -48,14 +48,27 @@
   }
   function _rimPatchFichaUnica() {
     // Ensure #mod-listas is visible when the modal opens (it may be display:none on other tabs)
+    // Also fixes precio c/IVA: buildFicha muestra precioFinal en ambas cajas sin aplicar IVA
     var orig = window.fichaUnica;
     if (typeof orig !== 'function') return;
     window.fichaUnica = function(cod) {
       var modListas = document.getElementById('mod-listas');
       if (modListas) modListas.style.display = 'block';
-      return orig.apply(this, arguments);
+      var result = orig.apply(this, arguments);
+      // Recalcular precio c/IVA (21% para todos los productos Arcor)
+      setTimeout(function() {
+        var prod = (typeof getProd === 'function') ? getProd(cod) : null;
+        if (!prod || !prod.precioFinal) return;
+        var modal = document.getElementById('modal-pdf');
+        if (!modal) return;
+        var ivaBox = modal.querySelector('.precio-box.iva .monto');
+        if (!ivaBox) return;
+        var precioConIVA = prod.precioFinal * 1.21;
+        ivaBox.textContent = '$' + precioConIVA.toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      }, 150);
+      return result;
     };
-    console.log('[RIMSA] fichaUnica parchado para mostrar mod-listas');
+    console.log('[RIMSA] fichaUnica parchado: mod-listas + IVA 21%');
   }
   function _rimLoadJsBarcode() {
     if (window.JsBarcode) {
