@@ -279,7 +279,7 @@ function parsePlanilla(rows) {
       var v = row[i];
       var code = toCode(v);
       if (code != null && isText(row[i + 1])) {
-        var pct = i > 0 ? toPct(row[i - 1]) : 0;
+        var pct = (i > 0 ? toPct(row[i - 1]) : 0) || toPct(row[i + 2]);
         var desc = String(row[i + 1]).replace(/\s+/g, ' ').trim();
         var sec = seccion[i + 1] || '';
         if (!items[code]) { orden.push(code); items[code] = { c: code, t: desc, s: sec, x: pct }; }
