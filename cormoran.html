@@ -131,6 +131,7 @@ main{padding-bottom:110px}
 .preview{white-space:pre-wrap;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;max-height:180px;overflow:auto}
 .btns{display:flex;gap:8px;flex-wrap:wrap}
 .btns .btn{flex:1 1 140px}
+.pfoot .btns{flex-direction:column}.pfoot .btns>*{flex:0 0 auto!important;width:100%}#copiar{order:2}#enviar-wrap .btn{width:100%;flex:0 0 auto!important}
 .drop{border:2px dashed var(--line);border-radius:10px;padding:22px 14px;text-align:center;color:var(--muted)}
 .drop.over{border-color:var(--brand);background:var(--chip)}
 .drop b{color:var(--ink)}
@@ -222,7 +223,7 @@ input,select,textarea{font-size:16px!important}
     <div class="preview" id="preview"></div>
     <div class="btns">
       <button class="btn ghost" id="copiar">Copiar texto</button>
-      <a class="btn wa" id="enviar" href="#" target="_blank" rel="noopener">Enviar por WhatsApp</a>
+      <div id="enviar-wrap" style="display:flex;flex-direction:column;gap:8px;flex:1 1 140px"></div>
     </div>
   </div>
 </aside>
@@ -235,6 +236,8 @@ input,select,textarea{font-size:16px!important}
     <label class="drop" id="drop" for="file"><b>Tocá para elegir archivos</b><br>o arrastralos acá</label>
     <input type="file" id="file" accept=".xlsx,.xls,.csv" multiple hidden>
     <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="sumar" style="width:18px;height:18px"> Sumar a la lista actual (si no, la reemplaza)</label>
+    <label class="field">Clave de administrador<input id="adm-key" type="password" autocomplete="off" placeholder="Para publicar la planilla para todos"></label>
+    <p class="note" id="adm-note">Con la clave, la planilla que cargues la ven todos los vendedores. Sin clave, queda solo en este celular.</p>
     <div class="log" id="log"></div>
     <button class="btn ghost" id="reset">Volver a la lista original incluida</button>
   </div>
@@ -407,26 +410,40 @@ $('list').addEventListener('input',function(e){
   setItem(+card.dataset.c,e.target.value,card.querySelector('.seg .on').dataset.m);
 });
 
-function pedidoTexto(){
+var WA_MAX=1200; // caracteres por mensaje: así el link de WhatsApp nunca se corta
+var WA_ABR={u:['UN','UN'],d:['DISP','DISP'],c:['CAJA','CAJAS']};
+function pedidoPartes(){
   var ks=Object.keys(cart);var d=new Date();
   var f=('0'+d.getDate()).slice(-2)+'/'+('0'+(d.getMonth()+1)).slice(-2)+'/'+d.getFullYear();
-  var t='*PEDIDO CORMORÁN*\n';
-  if($('cli').value.trim())t+='Sucursal: '+$('cli').value.trim()+'\n';
-  t+='Fecha: '+f+'\n';
-  if($('vend').value.trim())t+='Vendedor: '+$('vend').value.trim()+'\n';
-  t+='────────────\n';
-  ks.forEach(function(k){
-    var it=cart[k],r=IDX[k],desc=r?r[1]:((BASE[k]||{}).n||''),pct=r&&r[3]>0?r[3]:0;
-    t+='*'+k+'* · '+desc+'\n   '+it.q+' '+modeName(it.m,it.q).toUpperCase()+(pct?' · *DESC '+fmtPct(pct)+'*':'')+'\n';
+  var cab='*PEDIDO CORMORÁN* '+f+'\n';
+  if($('cli').value.trim())cab+='Sucursal: '+$('cli').value.trim()+'\n';
+  if($('vend').value.trim())cab+='Vendedor: '+$('vend').value.trim()+'\n';
+  var lineas=ks.map(function(k){
+    var it=cart[k],r=IDX[k],desc=(r?r[1]:((BASE[k]||{}).n||'')).replace(/\s+/g,' ').trim(),pct=r&&r[3]>0?r[3]:0;
+    if(desc.length>30)desc=desc.slice(0,29)+'…';
+    return '*'+k+'* '+it.q+' '+WA_ABR[it.m][it.q==1?0:1]+(pct?' *-'+fmtPct(pct)+'*':'')+' · '+desc;
   });
-  t+='────────────\nTotal: '+ks.length+' '+(ks.length==1?'código':'códigos')+'\n';
-  if($('obs').value.trim())t+='Obs: '+$('obs').value.trim()+'\n';
-  return t;
+  var pie='Total: '+ks.length+' '+(ks.length==1?'código':'códigos')+(($('obs').value.trim())?'\nObs: '+$('obs').value.trim():'');
+  var grupos=[],g=[],len=0,lim=WA_MAX-cab.length-pie.length-40;
+  lineas.forEach(function(l){if(g.length&&len+l.length+1>lim){grupos.push(g);g=[];len=0}g.push(l);len+=l.length+1});
+  if(g.length||!grupos.length)grupos.push(g);
+  var n=grupos.length;
+  return grupos.map(function(gr,i){
+    return cab+(n>1?'_Parte '+(i+1)+' de '+n+'_\n':'')+'────────\n'+gr.join('\n')+'\n────────\n'+(i==n-1?pie:'Sigue en la parte '+(i+2));
+  });
 }
-function waLink(){
+function pedidoTexto(){return pedidoPartes().join('\n\n')}
+function waLink(i){
   var tel=$('tel').value.replace(/\D/g,'');
   if(tel&&tel.length<=10)tel='549'+tel.replace(/^0/,'');
-  return 'https://wa.me/'+(tel||'')+'?text='+encodeURIComponent(pedidoTexto());
+  return 'https://wa.me/'+(tel||'')+'?text='+encodeURIComponent(pedidoPartes()[i||0]||'');
+}
+function renderEnviar(){
+  var w=$('enviar-wrap');if(!w)return;var ks=Object.keys(cart);
+  if(!ks.length){w.innerHTML='<a class="btn wa" href="#" onclick="event.preventDefault();toast(\'El pedido está vacío\')">Enviar por WhatsApp</a>';return}
+  var n=pedidoPartes().length;
+  w.innerHTML=(n>1?'<div class="note" style="text-align:center">El pedido es largo: se manda en '+n+' mensajes. Tocá cada botón en orden.</div>':'')+
+    Array.from({length:n},function(_,i){return '<a class="btn wa" target="_blank" rel="noopener" data-parte="'+i+'" href="'+esc(waLink(i))+'">'+(n>1?'Enviar parte '+(i+1)+' de '+n:'Enviar por WhatsApp')+'</a>'}).join('');
 }
 function renderCart(){
   var ks=Object.keys(cart),h='';
@@ -440,14 +457,14 @@ function renderCart(){
   });
   $('lines').innerHTML=h;
   $('preview').textContent=ks.length?pedidoTexto():'';
-  $('enviar').href=ks.length?waLink():'#';
+  renderEnviar();
 }
 $('lines').addEventListener('click',function(e){var l=e.target.closest('.line'),qb=e.target.closest('[data-q]');if(!l||!qb)return;var c=+l.dataset.c;setItem(c,cart[c].q+(+qb.dataset.q),cart[c].m)});
 $('lines').addEventListener('change',function(e){var l=e.target.closest('.line');if(!l)return;var c=+l.dataset.c;
   if(e.target.tagName==='SELECT'){setItem(c,cart[c].q,e.target.value);refreshCard(c)}else setItem(c,e.target.value,cart[c].m)});
 function refreshCard(c){var card=document.querySelector('.card[data-c="'+c+'"]');if(!card||!cart[c])return;card.querySelectorAll('[data-m]').forEach(function(b){b.classList.toggle('on',b.dataset.m===cart[c].m)})}
-['cli','vend','tel','obs'].forEach(function(id){var el=$(id);el.value=prefs[id]||'';el.addEventListener('input',function(){prefs[id]=el.value;LS.set('crm_prefs',prefs);if(Object.keys(cart).length){$('preview').textContent=pedidoTexto();$('enviar').href=waLink()}})});
-$('enviar').addEventListener('click',function(e){if(!Object.keys(cart).length){e.preventDefault();toast('El pedido está vacío')}else{this.href=waLink()}});
+['cli','vend','tel','obs'].forEach(function(id){var el=$(id);el.value=prefs[id]||'';el.addEventListener('input',function(){prefs[id]=el.value;LS.set('crm_prefs',prefs);if(Object.keys(cart).length){$('preview').textContent=pedidoTexto();renderEnviar()}})});
+$('enviar-wrap').addEventListener('click',function(e){var a=e.target.closest('[data-parte]');if(a){a.href=waLink(+a.dataset.parte);a.style.opacity='.55'}});
 $('copiar').addEventListener('click',function(){var t=pedidoTexto();
   function fb(){var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');toast('Pedido copiado')}catch(e){toast('No se pudo copiar')}ta.remove()}
   if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){toast('Pedido copiado')},fb);else fb()});
@@ -473,7 +490,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeAll();
 var lastLog=null;
 function renderLog(){
   var nd=lista.items.filter(function(r){return r[3]>0}).length,nf=lista.items.filter(function(r){return !BASE[r[0]]});
-  var h='<div>Lista actual: <b>'+esc(lista.nombre)+'</b></div><div><b>'+lista.items.length+'</b> productos · <b>'+nd+'</b> con descuento · <b>'+(lista.items.length-nf.length)+'</b> cruzados con el catálogo Arcor</div>';
+  var h='<div>Lista actual: <b>'+esc(lista.nombre)+'</b>'+(lista.publicada?' · publicada el '+new Date(lista.publicada).toLocaleDateString('es-AR'):'')+'</div><div><b>'+lista.items.length+'</b> productos · <b>'+nd+'</b> con descuento · <b>'+(lista.items.length-nf.length)+'</b> cruzados con el catálogo Arcor</div>';
   if(nf.length)h+='<div style="margin-top:6px">Sin ficha Arcor (se muestran con la descripción de la planilla): '+nf.slice(0,30).map(function(r){return r[0]}).join(', ')+(nf.length>30?'…':'')+'</div>';
   if(lastLog)h='<div style="color:var(--ok);font-weight:600;margin-bottom:6px">'+esc(lastLog)+'</div>'+h;
   $('log').innerHTML=h;
@@ -488,9 +505,27 @@ function leerArchivo(file){
     fr.onerror=rej;fr.readAsArrayBuffer(file);
   });
 }
+
+/* ---------- planilla compartida en la nube ---------- */
+var NUBE_URL='https://lhlrgnypkwrubrzwnhdc.supabase.co/rest/v1/rimsa_data',NUBE_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxobHJnbnlwa3dydWJyenduaGRjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3MjExMTQsImV4cCI6MjA5NzI5NzExNH0.zQemk-MyVZGH8wKEyBpi8UZ6uvOu9u2hWiHvaKR1NXQ',NUBE_ID=15;
+function esAdmin(){var k=($('adm-key').value||'').trim().toUpperCase();return k==='RIMSA'}
+function nubeGuardar(){
+  var body={id:NUBE_ID,data:{lista:lista,ts:Date.now(),por:$('vend').value||''}};
+  return fetch(NUBE_URL,{method:'POST',headers:{'Content-Type':'application/json',apikey:NUBE_KEY,Authorization:'Bearer '+NUBE_KEY,Prefer:'resolution=merge-duplicates'},body:JSON.stringify(body)})
+   .then(function(r){if(!(r.ok||r.status===201))throw 0;LS.set('crm_ts',body.data.ts);lista.publicada=body.data.ts;LS.set('crm_lista',lista);return true}).catch(function(){return false});
+}
+function nubeCargar(){
+  return fetch(NUBE_URL+'?id=eq.'+NUBE_ID+'&select=data',{cache:'no-store',headers:{apikey:NUBE_KEY,Authorization:'Bearer '+NUBE_KEY}})
+   .then(function(r){return r.ok?r.json():null}).then(function(j){var d=j&&j[0]&&j[0].data;if(!d||!d.lista||!d.lista.items)return;
+     if(d.ts===LS.get('crm_ts',0))return;
+     lista=d.lista;lista.publicada=d.ts;LS.set('crm_lista',lista);LS.set('crm_ts',d.ts);IDX=byCode();
+     fillSecciones();applyFilter();updateCount();if(!$('p-cargar').hidden)renderLog();toast('Planilla actualizada: '+(lista.nombre||''));
+   }).catch(function(){});
+}
 function cargar(files){
   if(!files||!files.length)return;
   if(typeof XLSX==='undefined'){toast('No se pudo cargar el lector de Excel. Revisá la conexión.');return}
+  var _nombres=[].map.call(files,function(f){return f.name.replace(/\.[^.]+$/,'').replace(/^[0-9a-f]{8}-/,'')}).join(' + ')||'Planilla Cormorán';
   Promise.all([].map.call(files,leerArchivo)).then(function(res){
     var sumar=$('sumar').checked,map={},orden=[];
     function add(r){if(!map[r[0]]){orden.push(r[0]);map[r[0]]=r.slice()}else{var o=map[r[0]];if(r[3]>0||sumar)o[3]=r[3]>0?r[3]:o[3];if(r[2])o[2]=o[2]||r[2]}}
@@ -498,11 +533,13 @@ function cargar(files){
     var nuevos=0,conDesc=0;
     res.forEach(function(arr){arr.forEach(function(x){if(!map[x.c])nuevos++;if(x.x>0)conDesc++;add([x.c,x.t,x.s,x.x])})});
     if(!orden.length){toast('No encontré códigos en ese archivo');return}
-    var nombres=[].map.call(files,function(f){return f.name.replace(/\.[^.]+$/,'')}).join(' + ');
+    var nombres=_nombres;
     lista={nombre:(sumar?lista.nombre+' + ':'')+nombres,items:orden.map(function(c){return map[c]})};
     LS.set('crm_lista',lista);IDX=byCode();
     lastLog=(sumar?'Sumados ':'Cargados ')+nuevos+' códigos nuevos, '+conDesc+' con descuento.';
-    fillSecciones();applyFilter();renderLog();updateCount();toast(lastLog);
+    fillSecciones();applyFilter();renderLog();updateCount();
+    if(esAdmin()){toast('Publicando para todos…');nubeGuardar().then(function(ok){lastLog+=ok?' Publicada: ya la ven todos los vendedores.':' No se pudo publicar (sin conexión): quedó solo en este celular.';renderLog();toast(ok?'✅ Planilla publicada para todos':'⚠️ No se pudo publicar. Probá de nuevo con conexión.')})}
+    else{lastLog+=' Quedó solo en este celular.';renderLog();toast(lastLog)}
   }).catch(function(e){toast('No pude leer el archivo: '+(e&&e.message||e))});
 }
 $('file').addEventListener('change',function(){cargar(this.files);this.value=''});
@@ -517,7 +554,10 @@ var tq;$('q').addEventListener('input',function(){clearTimeout(tq);tq=setTimeout
 $('sec').addEventListener('change',function(){applyFilter();window.scrollTo(0,0)});
 $('solo-desc').addEventListener('change',function(){applyFilter();window.scrollTo(0,0)});
 
+try{$('adm-key').value=LS.get('crm_adm','')}catch(e){}
+$('adm-key').addEventListener('input',function(){if(esAdmin())LS.set('crm_adm',this.value.trim())});
 fillSecciones();applyFilter();updateCount();
+nubeCargar();
 })();
 </script>
 </body>
