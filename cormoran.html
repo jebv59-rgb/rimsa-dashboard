@@ -232,10 +232,11 @@ input,select,textarea{font-size:16px!important}
 <aside class="panel" id="p-cargar" hidden aria-label="Cargar planilla">
   <div class="ph-head"><h2>Planilla del mes</h2><button class="x" data-close aria-label="Cerrar">✕</button></div>
   <div class="pbody">
-    <p class="note">Subí la planilla de Cormorán (.xlsx, .xls o .csv). Se toma el código, la descripción y el % de la columna a la izquierda del código. Los códigos con letras (ej. AG10129) se cruzan por los números.</p>
+    <p class="note">Subí la planilla de Cormorán (.xlsx, .xls o .csv), ya sea la lista completa o solo los productos con descuento del mes. Se toma el código, la descripción y el % de la columna a la izquierda del código. Los códigos con letras (ej. AG10129) se cruzan por los números.</p>
     <label class="drop" id="drop" for="file"><b>Tocá para elegir archivos</b><br>o arrastralos acá</label>
     <input type="file" id="file" accept=".xlsx,.xls,.csv" multiple hidden>
-    <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="sumar" style="width:18px;height:18px"> Sumar a la lista actual (si no, la reemplaza)</label>
+    <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="sumar" style="width:18px;height:18px"> Es una lista completa nueva (reemplaza todo el catálogo)</label>
+    <p class="note">Sin tildar, el archivo solo <b>actualiza los descuentos</b>: el catálogo completo se mantiene, los productos del archivo toman su nuevo %, los que no vienen quedan sin descuento y los códigos nuevos se agregan.</p>
     <label class="field">Clave de administrador<input id="adm-key" type="password" autocomplete="off" placeholder="Para publicar la planilla para todos"></label>
     <p class="note" id="adm-note">Con la clave, la planilla que cargues la ven todos los vendedores. Sin clave, queda solo en este celular.</p>
     <div class="log" id="log"></div>
@@ -527,16 +528,21 @@ function cargar(files){
   if(typeof XLSX==='undefined'){toast('No se pudo cargar el lector de Excel. Revisá la conexión.');return}
   var _nombres=[].map.call(files,function(f){return f.name.replace(/\.[^.]+$/,'').replace(/^[0-9a-f]{8}-/,'')}).join(' + ')||'Planilla Cormorán';
   Promise.all([].map.call(files,leerArchivo)).then(function(res){
-    var sumar=$('sumar').checked,map={},orden=[];
-    function add(r){if(!map[r[0]]){orden.push(r[0]);map[r[0]]=r.slice()}else{var o=map[r[0]];if(r[3]>0||sumar)o[3]=r[3]>0?r[3]:o[3];if(r[2])o[2]=o[2]||r[2]}}
-    if(sumar)lista.items.forEach(add);
-    var nuevos=0,conDesc=0;
-    res.forEach(function(arr){arr.forEach(function(x){if(!map[x.c])nuevos++;if(x.x>0)conDesc++;add([x.c,x.t,x.s,x.x])})});
-    if(!orden.length){toast('No encontré códigos en ese archivo');return}
+    var completa=$('sumar').checked,map={},orden=[],nuevos=0,conDesc=0,actualizados=0,quitados=0;
+    var filas=[];res.forEach(function(arr){arr.forEach(function(x){filas.push(x)})});
+    if(!filas.length){toast('No encontré códigos en ese archivo');return}
+    if(completa){
+      filas.forEach(function(x){if(!map[x.c]){orden.push(x.c);map[x.c]=[x.c,x.t,x.s,x.x];if(!IDX[x.c])nuevos++}else if(x.x>map[x.c][3])map[x.c][3]=x.x});
+    }else{
+      lista.items.forEach(function(r){orden.push(r[0]);var o=r.slice();if(o[3]>0)quitados++;o[3]=0;map[r[0]]=o});
+      filas.forEach(function(x){var o=map[x.c];if(!o){orden.push(x.c);o=map[x.c]=[x.c,x.t,x.s||'Nuevos',0];nuevos++}if(x.x>o[3])o[3]=x.x});
+    }
+    orden.forEach(function(c){if(map[c][3]>0)conDesc++});
+    if(!completa){actualizados=filas.filter(function(x){return x.x>0}).length;quitados=Math.max(0,quitados-orden.filter(function(c){return map[c][3]>0&&lista.items.some(function(r){return r[0]===c&&r[3]>0})}).length)}
     var nombres=_nombres;
-    lista={nombre:(sumar?lista.nombre+' + ':'')+nombres,items:orden.map(function(c){return map[c]})};
+    lista={nombre:completa?nombres:(String(lista.nombre||'').split(' · desc. ')[0]+' · desc. '+nombres),items:orden.map(function(c){return map[c]})};
     LS.set('crm_lista',lista);IDX=byCode();
-    lastLog=(sumar?'Sumados ':'Cargados ')+nuevos+' códigos nuevos, '+conDesc+' con descuento.';
+    lastLog=completa?('Lista completa cargada: '+orden.length+' productos, '+conDesc+' con descuento.'):('Descuentos actualizados: '+conDesc+' productos con descuento sobre '+orden.length+' del catálogo'+(nuevos?', '+nuevos+' códigos nuevos agregados':'')+(quitados?', '+quitados+' perdieron el descuento del mes anterior':'')+'.');
     fillSecciones();applyFilter();renderLog();updateCount();
     if(esAdmin()){toast('Publicando para todos…');nubeGuardar().then(function(ok){lastLog+=ok?' Publicada: ya la ven todos los vendedores.':' No se pudo publicar (sin conexión): quedó solo en este celular.';renderLog();toast(ok?'✅ Planilla publicada para todos':'⚠️ No se pudo publicar. Probá de nuevo con conexión.')})}
     else{lastLog+=' Quedó solo en este celular.';renderLog();toast(lastLog)}
